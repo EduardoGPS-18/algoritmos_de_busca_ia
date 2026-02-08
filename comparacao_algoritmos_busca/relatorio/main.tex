@@ -1,0 +1,98 @@
+\documentclass[12pt]{article}
+
+\usepackage{sbc-template}
+\usepackage{graphicx,url}
+\usepackage[utf8]{inputenc}
+\usepackage[brazil]{babel}
+
+\sloppy
+
+\title{Comparação de Algoritmos de Busca em Grafos para Roteamento em Ouro Preto}
+
+\author{[Nomes dos integrantes]\inst{1}}
+
+\address{Departamento de Computação -- Universidade Federal de Ouro Preto (UFOP)\\
+  Ouro Preto -- MG -- Brazil
+  \email{[emails@ufop.edu.br]}
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+  Este trabalho aplica técnicas de Inteligência Artificial (busca em grafos) ao problema de roteamento em Ouro Preto, considerando uma função de custo que incorpora distância, declividade, rugosidade do pavimento e congestionamento. São implementados e comparados os algoritmos de Dijkstra, A* e D* Lite em cenários estático, de evento (ruas interditadas) e climático (chuva). Os resultados incluem custo da solução e latência de re-roteamento, com discussão sobre adequação de cada algoritmo ao contexto de mobilidade em cidade histórica.
+\end{abstract}
+
+\begin{resumo}
+  Este trabalho aplica técnicas de Inteligência Artificial (busca em grafos) ao problema de roteamento em Ouro Preto, considerando uma função de custo que incorpora distância, declividade, rugosidade do pavimento e congestionamento. São implementados e comparados os algoritmos de Dijkstra, A* e D* Lite em cenários estático, de evento (ruas interditadas) e climático (chuva). Os resultados incluem custo da solução e latência de re-roteamento, com discussão sobre adequação de cada algoritmo ao contexto de mobilidade em cidade histórica.
+\end{resumo}
+
+% --- Conteúdo conforme especificação (até 9 páginas) ---
+
+\section{Introdução}\label{sec:intro}
+
+Apresentar o contexto do problema de mobilidade em Ouro Preto, o objetivo do trabalho e a escolha da técnica (algoritmos de busca em grafos). Mencionar a estrutura do relatório.
+
+\section{Descrição do Problema}\label{sec:problema}
+
+Descrever a modelagem do problema:
+\begin{itemize}
+  \item \textbf{Grafo:} vértices (interseções e pontos de interesse) e arestas direcionadas (segmentos de vias).
+  \item \textbf{Função de custo:} composição de distância, penalização por declividade (ex.: ladeiras acima de 15\%), coeficiente de rugosidade (pavimento pé de moleque) e relação volume/capacidade (congestionamento).
+\end{itemize}
+
+Citar a base do trabalho (\texttt{base\_trabalho\_ia.pdf}) e referências sobre mobilidade em cidades históricas.
+
+\section{Técnica de IA e Justificativa}\label{sec:tecnica}
+
+Justificar a escolha dos \textbf{algoritmos de busca em grafos} e descrever brevemente:
+\begin{itemize}
+  \item \textbf{Dijkstra:} busca exaustiva, caminho de custo mínimo garantido; desvantagem de custo computacional e necessidade de recálculo total em ambientes dinâmicos.
+  \item \textbf{A*:} busca heurística ($f(n)=g(n)+h(n)$), menor expansão de nós; adequado a cenários estáticos.
+  \item \textbf{D* Lite:} replanejamento incremental, adequado a mudanças em tempo real (ruas interditadas, eventos).
+\end{itemize}
+
+\section{Implementação}\label{sec:implementacao}
+
+Descrever a implementação em Python:
+\begin{itemize}
+  \item Linguagem e ambiente (Jupyter Notebook).
+  \item Estrutura do código em \texttt{src/}: modelagem do grafo (\texttt{graph.py}), algoritmos (\texttt{dijkstra}, \texttt{a\_star}, \texttt{d\_star\_lite}), cenários (\texttt{scenarios.py}) e métricas (\texttt{metrics.py}).
+  \item Parâmetros utilizados: fatores de penalidade por declividade, multiplicador de chuva, custo infinito para ruas interditadas.
+  \item Link de acesso ao código (repositório ou Overleaf conforme combinado).
+\end{itemize}
+
+\section{Cenários de Simulação}\label{sec:cenarios}
+
+\begin{itemize}
+  \item \textbf{Cenário de evento:} peso infinito em ruas interditadas (ex.: Rua Diogo de Vasconcelos, Praça Tiradentes); o sistema deve sugerir rotas alternativas (Rua do Pilar, Xavier da Veiga).
+  \item \textbf{Cenário climático:} aumento dos pesos das ladeiras íngremes em 200\% para simular chuva.
+\end{itemize}
+
+\section{Resultados e Análise Crítica}\label{sec:resultados}
+
+Apresentar:
+\begin{itemize}
+  \item Custo da solução (caminho) para cada algoritmo nos cenários baseline, evento e clima.
+  \item Latência de re-roteamento (tempo de execução); meta $< 100$ ms para uso em tempo real.
+  \item Tabelas e/ou figuras geradas a partir do notebook \texttt{experimentos.ipynb}.
+  \item Análise crítica: limitações, adequação de cada algoritmo e possíveis melhorias (ex.: integração com dados reais Ourotran, estatística GEH).
+\end{itemize}
+
+\section{Conclusões}\label{sec:conclusoes}
+
+Síntese dos resultados, adequação da técnica ao problema e trabalhos futuros.
+
+\section{Referências}\label{sec:refs}
+
+Referências no formato ABNT (utilizar \texttt{sbc-template.bib} e estilo SBC). Incluir:
+\begin{itemize}
+  \item Base do trabalho e especificação da disciplina.
+  \item Trabalhos sobre Dijkstra, A*, D* Lite e mobilidade em cidades históricas (ex.: referências indicadas em \texttt{base\_trabalho\_ia.pdf}).
+\end{itemize}
+
+\bibliographystyle{sbc}
+\bibliography{sbc-template}
+
+\end{document}
