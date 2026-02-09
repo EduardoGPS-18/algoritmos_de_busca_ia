@@ -141,8 +141,10 @@ def _build_cytoscape_elements(
     elements: List[Dict[str, Any]] = []
     for n in G.nodes():
         x, y = pos[n][0], pos[n][1]
-        display_label = G.nodes[n].get("label", n)
-        base_label = _abbreviate_city_in_label(display_label)
+        display_label = G.nodes[n].get("label") or n
+        if not (display_label and str(display_label).strip()):
+            display_label = n.replace("_", " ").replace("-", " ").title()
+        base_label = _abbreviate_city_in_label(str(display_label).strip())
         region = _get_region_from_graph(G, n)
         has_rain = bool(rain_by_region and rain_by_region.get(region, 1.0) > 1.0)
         if has_rain:
@@ -316,6 +318,8 @@ def display_graph(
                 "text-valign": "bottom",
                 "text-halign": "center",
                 "text-margin-y": 10,
+                "text-wrap": "wrap",
+                "text-max-width": "120px",
             },
         },
     ]

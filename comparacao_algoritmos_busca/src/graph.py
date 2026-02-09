@@ -12,8 +12,9 @@ from __future__ import annotations
 import math
 import os
 import pickle
+import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 import networkx as nx
 import requests
@@ -21,6 +22,8 @@ import requests
 # Diretório de cache (raiz do projeto = pasta comparacao_algoritmos_busca)
 _CACHE_DIR = Path(__file__).resolve().parent.parent / "cache"
 _CACHE_OURO_PRETO = _CACHE_DIR / "grafo_ouro_preto.gpickle"
+_CACHE_OP_GRAPH = _CACHE_DIR / "grafo_op_osm.gpickle"
+_CACHE_OSM_WAY_NEIGHBORS = _CACHE_DIR / "osm_way_neighbors_cache.pickle"
 _CACHE_REGIONAL = _CACHE_DIR / "grafo_regional.gpickle"
 _CACHE_GOOGLE_MAPS = _CACHE_DIR / "google_maps_api_cache.pickle"
 
@@ -222,6 +225,16 @@ def _lat_lng_to_xy_meters(lat: float, lng: float, ref_lat: float, ref_lng: float
     return (x, y)
 
 
+def _straight_line_distance_meters(
+    lat1: float, lng1: float, lat2: float, lng2: float,
+    ref_lat: float, ref_lng: float,
+) -> float:
+    """Distância em linha reta entre dois pontos (lat,lng) em metros, usando a mesma projeção que _lat_lng_to_xy_meters."""
+    x1, y1 = _lat_lng_to_xy_meters(lat1, lng1, ref_lat, ref_lng)
+    x2, y2 = _lat_lng_to_xy_meters(lat2, lng2, ref_lat, ref_lng)
+    return math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
+
+
 def _geocode(api_key: str, address: str) -> Optional[Tuple[float, float]]:
     """Obtém (lat, lng) de um endereço via Google Geocoding API."""
     result = _geocode_with_components(api_key, address)
@@ -319,9 +332,120 @@ def _slope_pct_from_elevation(
     return (elev_dest_m - elev_origin_m) / distance_m * 100.0
 
 
-# Overpass API (OpenStreetMap) para rugosidade (tag surface).
+# Overpass API (OpenStreetMap) para rugosidade e conectividade de ruas.
 # Ref: https://wiki.openstreetmap.org/wiki/Overpass_API
 OVERPASS_API_URL = "https://overpass-api.de/api/interpreter"
+
+# Bbox Ouro Preto — sede (south, west, north, east) em graus, para consultas Overpass.
+# Centro ref: (-20.3855, -43.5034). Raio ~0.04° ≈ 4,4 km (só a área urbana da sede).
+# Valores explícitos: south=-20.4255, west=-43.5434, north=-20.3455, east=-43.4634
+_OURO_PRETO_RADIUS_DEG = 0.04
+OURO_PRETO_BBOX = (
+    OURO_PRETO_REF_LAT - _OURO_PRETO_RADIUS_DEG,
+    OURO_PRETO_REF_LNG - _OURO_PRETO_RADIUS_DEG,
+    OURO_PRETO_REF_LAT + _OURO_PRETO_RADIUS_DEG,
+    OURO_PRETO_REF_LNG + _OURO_PRETO_RADIUS_DEG,
+)
+
+
+def _get_street_name_from_address(address: str) -> str:
+    """Extrai o nome da rua do endereço (parte antes da primeira vírgula). Ex: 'Rua São José, Ouro Preto, MG' -> 'Rua São José'."""
+    return address.split(",")[0].strip() if address else ""
+
+
+def _query_overpass_connected_street_names(
+    street_name: str,
+    south: float,
+    west: float,
+    north: float,
+    east: float,
+    timeout: int = 25,
+    url: str = OVERPASS_API_URL,
+) -> Set[str]:
+    """
+    Consulta Overpass: ruas (ways highway) que compartilham nós com a rua de nome street_name na bbox.
+    Retorna conjunto de nomes de ruas conectadas (inclui a própria rua; o chamador pode remover).
+    Baseado em: way["name"="X"]; node(w); way(bn)[highway]; -> nomes dos ways.
+    """
+    if not street_name or not street_name.strip():
+        return set()
+    # Aspas no nome quebram a query; substituir por espaço para segurança
+    name_safe = street_name.replace('"', " ").strip()
+    if not name_safe:
+        return set()
+    query = (
+        f'[out:json][timeout:{timeout}];'
+        f'way["name"="{name_safe}"]({south},{west},{north},{east})->.rua_origem;'
+        "node(w.rua_origem)->.nos_da_rua;"
+        'way(bn.nos_da_rua)["highway"];'
+        "out body;"
+    )
+    try:
+        r = requests.post(url, data={"data": query}, timeout=timeout + 5)
+        r.raise_for_status()
+        data = r.json()
+        names: Set[str] = set()
+        for el in data.get("elements", []):
+            if el.get("type") == "way":
+                n = (el.get("tags") or {}).get("name")
+                if n and isinstance(n, str):
+                    names.add(n.strip())
+        return names
+    except Exception:
+        return set()
+
+
+def get_osm_connected_pairs(
+    places: List[Dict[str, Any]],
+    bbox: Tuple[float, float, float, float],
+    use_cache: bool = True,
+) -> Set[Tuple[str, str]]:
+    """
+    Para cada lugar, obtém o nome da rua (do address), consulta Overpass para ruas que tocam essa rua,
+    e monta o conjunto de pares (place_id_origem, place_id_destino) onde a rua de destino está conectada
+    à rua de origem segundo o OSM. Retorna set de (id_a, id_b); não inclui (i,i).
+    """
+    south, west, north, east = bbox
+    place_id_to_street: Dict[str, str] = {}
+    street_to_place_ids: Dict[str, List[str]] = {}
+    for p in places:
+        pid = p.get("id", "")
+        addr = p.get("address", "")
+        street = _get_street_name_from_address(addr)
+        place_id_to_street[pid] = street
+        street_to_place_ids.setdefault(street, []).append(pid)
+
+    cache_osm: Dict[str, Set[str]] = {}
+    cache_file = _CACHE_DIR / "osm_connectivity_cache.pickle"
+    if use_cache and cache_file.is_file():
+        try:
+            with open(cache_file, "rb") as f:
+                cache_osm = pickle.load(f)
+        except Exception:
+            cache_osm = {}
+
+    connected_pairs: Set[Tuple[str, str]] = set()
+    for p in places:
+        pid = p["id"]
+        street = place_id_to_street.get(pid, "")
+        if not street:
+            continue
+        if street not in cache_osm:
+            cache_osm[street] = _query_overpass_connected_street_names(street, south, west, north, east)
+        connected_names = cache_osm[street]
+        for other_street in connected_names:
+            for other_id in street_to_place_ids.get(other_street, []):
+                if other_id != pid:
+                    connected_pairs.add((pid, other_id))
+
+    if use_cache and cache_osm:
+        _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        try:
+            with open(cache_file, "wb") as f:
+                pickle.dump(cache_osm, f)
+        except Exception:
+            pass
+    return connected_pairs
 
 
 def _query_overpass_ways_surface(
@@ -407,6 +531,21 @@ def _get_route_distance_meters(
     destination: Tuple[float, float],
 ) -> Optional[float]:
     """Obtém a distância em metros da rota entre origem e destino (Google Directions API)."""
+    info = _get_route_info(api_key, origin, destination)
+    return info[0] if info else None
+
+
+def _get_route_info(
+    api_key: str,
+    origin: Tuple[float, float],
+    destination: Tuple[float, float],
+) -> Optional[Tuple[float, int]]:
+    """
+    Obtém (distância em metros, número de steps) da rota entre origem e destino (Google Directions API).
+    Cada 'step' = um trecho da rota (ex.: "Siga na Rua X", "Vire à esquerda"). Rotas com 1 step
+    (ou poucos) indicam ligação direta entre os dois pontos; muitas steps indicam que a rota
+    passa por outras ruas. Retorna None se não houver rota.
+    """
     url = "https://maps.googleapis.com/maps/api/directions/json"
     params = {
         "origin": f"{origin[0]},{origin[1]}",
@@ -420,7 +559,10 @@ def _get_route_distance_meters(
         data = r.json()
         if data.get("status") != "OK" or not data.get("routes"):
             return None
-        return data["routes"][0]["legs"][0]["distance"]["value"]
+        leg = data["routes"][0]["legs"][0]
+        dist = leg["distance"]["value"]
+        num_steps = len(leg.get("steps", []))
+        return (float(dist), num_steps)
     except Exception:
         return None
 
@@ -471,6 +613,9 @@ def build_graph_from_google_maps(
     use_elevation: bool = True,
     use_roughness: bool = True,
     use_cache: bool = True,
+    use_osm_connectivity: bool = True,
+    fetch_distances: bool = True,
+    direct_connection_max_steps: Optional[int] = 2,
 ) -> nx.DiGraph:
     """
     Gera um grafo (NetworkX DiGraph) a partir do Google Maps.
@@ -482,9 +627,15 @@ def build_graph_from_google_maps(
     - use_elevation: se True, chama Google Elevation API para obter elevação de cada nó e calcula slope_pct por aresta.
     - use_roughness: se True, chama Overpass API para obter rugosidade (tag surface) por nó e atualiza roughness nas arestas.
     - use_cache: se True, usa cache de Geocoding e Directions em google_maps_api_cache.pickle para evitar chamadas repetidas.
+    - use_osm_connectivity: se True (recomendado), usa Overpass API (OSM) para obter quais ruas estão diretamente ligadas
+      (compartilham nós); Directions é chamado apenas para esses pares. Grafo fica esparso e realista.
+    - fetch_distances: se True (padrão), obtém distância entre nós via Google Directions. Se False, só constrói o grafo
+      com Geocoding (lat/long) e conexões (Overpass); a distância das arestas é a distância em linha reta (metros).
+    - direct_connection_max_steps: usado só quando use_osm_connectivity=False. Se definido, só cria aresta quando
+      a rota tem no máximo esse número de steps (Directions). Use None para desativar.
 
     Nós = um por lugar (id, pos em metros, label = address).
-    Arestas = rotas entre cada par (origem → destino) via Directions API; distance em metros.
+    Arestas = entre pares conectados (OSM); distância via Directions se fetch_distances=True, senão linha reta.
     """
     key = api_key or os.environ.get("GOOGLE_MAPS_API_KEY")
     if not key:
@@ -513,7 +664,7 @@ def build_graph_from_google_maps(
     G.graph[KEY_EDGE_OVERRIDE] = {}
     G.graph[KEY_EDGE_COST_MULTIPLIER] = {}
 
-    print(f"Building graph from Google Maps with use_elevation: {use_elevation} and use_roughness: {use_roughness}")
+    print(f"Building graph from Google Maps (use_elevation={use_elevation}, use_roughness={use_roughness}, use_osm_connectivity={use_osm_connectivity}, fetch_distances={fetch_distances})")
     # Geocodificar todos os lugares (com cache)
     coords: Dict[str, Tuple[float, float]] = {}
     for p in places:
@@ -532,29 +683,55 @@ def build_graph_from_google_maps(
         region = p.get("region", _get_region(pid) if _get_region(pid) != "default" else pid)
         G.add_node(pid, pos=(x, y), label=addr, lat=lat_lng[0], lng=lat_lng[1], region=region)
 
-    # Para cada par (origem, destino), obter rota e adicionar aresta (com cache)
-    for i, p_orig in enumerate(places):
-        orig_id = p_orig["id"]
-        for j, p_dest in enumerate(places):
-            if i == j:
-                continue
-            dest_id = p_dest["id"]
+    # Pares (origem, destino) para os quais pedir Directions: OSM conectados ou todos
+    if use_osm_connectivity:
+        connected_pairs = get_osm_connected_pairs(places, OURO_PRETO_BBOX, use_cache=use_cache)
+        print(f"OSM conectividade: {len(connected_pairs)} pares de ruas diretamente ligadas.")
+    else:
+        connected_pairs = None  # todos os pares (exceto i==j)
+
+    # Para cada par permitido, obter rota (Directions) e adicionar aresta (com cache)
+    if connected_pairs is not None:
+        pairs_to_fetch = list(connected_pairs)
+    else:
+        pairs_to_fetch = [(p_orig["id"], p_dest["id"]) for i, p_orig in enumerate(places) for j, p_dest in enumerate(places) if i != j]
+
+    for orig_id, dest_id in pairs_to_fetch:
+        if fetch_distances:
             dkey = _directions_key(coords[orig_id], coords[dest_id])
             if use_cache and dkey in cache["directions"]:
-                dist = cache["directions"][dkey]
+                cached = cache["directions"][dkey]
+                if isinstance(cached, tuple):
+                    dist, num_steps = cached
+                else:
+                    dist, num_steps = cached, 1
             else:
-                dist = _get_route_distance_meters(key, coords[orig_id], coords[dest_id])
-                if use_cache:
-                    cache["directions"][dkey] = dist  # sempre grava (dados Google ou None = não existe caminho)
-            if dist is not None and dist > 0:
-                G.add_edge(
-                    orig_id,
-                    dest_id,
-                    distance=float(dist),
-                    slope_pct=default_slope_pct,
-                    roughness=default_roughness,
-                    volume_capacity_ratio=default_volume_capacity_ratio,
-                )
+                info = _get_route_info(key, coords[orig_id], coords[dest_id])
+                if info is not None:
+                    dist, num_steps = info
+                    if use_cache:
+                        cache["directions"][dkey] = (dist, num_steps)
+                else:
+                    dist, num_steps = None, 0
+            if dist is None or dist <= 0:
+                continue
+            add_edge = use_osm_connectivity or (direct_connection_max_steps is None or num_steps <= direct_connection_max_steps)
+        else:
+            dist = _straight_line_distance_meters(
+                coords[orig_id][0], coords[orig_id][1],
+                coords[dest_id][0], coords[dest_id][1],
+                ref_lat, ref_lng,
+            )
+            add_edge = True
+        if add_edge and dist > 0:
+            G.add_edge(
+                orig_id,
+                dest_id,
+                distance=float(dist),
+                slope_pct=default_slope_pct,
+                roughness=default_roughness,
+                volume_capacity_ratio=default_volume_capacity_ratio,
+            )
 
     if use_cache:
         _CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -580,29 +757,29 @@ def build_graph_from_google_maps(
 # Lista padrão: somente ruas da sede de Ouro Preto, MG (sem pontos de interesse).
 # Mapeamento: id -> endereço para geocoding e grafo. Duplicatas por (lat, lng) removidas.
 DEFAULT_OURO_PRETO_PLACES = [
-    {"id": "sao_jose", "address": "Rua São José, Ouro Preto, MG"},
-    {"id": "conde_bobadela", "address": "Rua Conde de Bobadela, Ouro Preto, MG"},
-    {"id": "rua_pilar", "address": "Rua do Pilar, Ouro Preto, MG"},
-    {"id": "xavier_veiga", "address": "Rua Xavier da Veiga, Ouro Preto, MG"},
-    {"id": "padre_rolim", "address": "Rua Padre Rolim, Ouro Preto, MG"},
-    {"id": "claudio_manoel", "address": "Rua Cláudio Manoel, Ouro Preto, MG"},
-    {"id": "conselheiro_quintiliano", "address": "Rua Conselheiro Quintiliano, Ouro Preto, MG"},
-    {"id": "paulistas", "address": "Rua dos Paulistas, Ouro Preto, MG"},
-    {"id": "getulio_vargas", "address": "Rua Getúlio Vargas, Ouro Preto, MG"},
-    {"id": "henri_gorceix", "address": "Rua Henri Gorceix, Ouro Preto, MG"},
-    {"id": "joao_de_paiva", "address": "Rua João de Paiva, Ouro Preto, MG"},
-    {"id": "teixeira_amaral", "address": "Rua Teixeira Amaral, Ouro Preto, MG"},
-    {"id": "coronel_alves", "address": "Rua Coronel Alves, Ouro Preto, MG"},
-    {"id": "conego_trindade", "address": "Rua Cônego Trindade, Ouro Preto, MG"},
-    {"id": "direita", "address": "Rua Direita, Ouro Preto, MG"},
-    {"id": "bernardo_vasconcelos", "address": "Rua Bernardo Vasconcelos, Ouro Preto, MG"},
-    {"id": "sao_francisco_assis", "address": "Rua São Francisco de Assis, Ouro Preto, MG"},
-    {"id": "dom_silverio", "address": "Rua Dom Silvério, Ouro Preto, MG"},
-    {"id": "camilo_brito", "address": "Rua Camilo de Brito, Ouro Preto, MG"},
-    {"id": "parana", "address": "Rua Paraná, Ouro Preto, MG"},
-    {"id": "alvarenga", "address": "Rua Alvarenga, Ouro Preto, MG"},
-    {"id": "flores", "address": "Rua das Flores, Ouro Preto, MG"},
-    {"id": "conceicao", "address": "Rua da Conceição, Ouro Preto, MG"},
+    # {"id": "sao_jose", "address": "Rua São José, Ouro Preto, MG"},
+    # {"id": "conde_bobadela", "address": "Rua Conde de Bobadela, Ouro Preto, MG"},
+    # {"id": "rua_pilar", "address": "Rua do Pilar, Ouro Preto, MG"},
+    # {"id": "xavier_veiga", "address": "Rua Xavier da Veiga, Ouro Preto, MG"},
+    # {"id": "padre_rolim", "address": "Rua Padre Rolim, Ouro Preto, MG"},
+    # {"id": "claudio_manoel", "address": "Rua Cláudio Manoel, Ouro Preto, MG"},
+    # {"id": "conselheiro_quintiliano", "address": "Rua Conselheiro Quintiliano, Ouro Preto, MG"},
+    # {"id": "paulistas", "address": "Rua dos Paulistas, Ouro Preto, MG"},
+    # {"id": "getulio_vargas", "address": "Rua Getúlio Vargas, Ouro Preto, MG"},
+    # {"id": "henri_gorceix", "address": "Rua Henri Gorceix, Ouro Preto, MG"},
+    # {"id": "joao_de_paiva", "address": "Rua João de Paiva, Ouro Preto, MG"},
+    # {"id": "teixeira_amaral", "address": "Rua Teixeira Amaral, Ouro Preto, MG"},
+    # {"id": "coronel_alves", "address": "Rua Coronel Alves, Ouro Preto, MG"},
+    # {"id": "conego_trindade", "address": "Rua Cônego Trindade, Ouro Preto, MG"},
+    # {"id": "direita", "address": "Rua Direita, Ouro Preto, MG"},
+    # {"id": "bernardo_vasconcelos", "address": "Rua Bernardo Vasconcelos, Ouro Preto, MG"},
+    # {"id": "sao_francisco_assis", "address": "Rua São Francisco de Assis, Ouro Preto, MG"},
+    # {"id": "dom_silverio", "address": "Rua Dom Silvério, Ouro Preto, MG"},
+    # {"id": "camilo_brito", "address": "Rua Camilo de Brito, Ouro Preto, MG"},
+    # {"id": "parana", "address": "Rua Paraná, Ouro Preto, MG"},
+    # {"id": "alvarenga", "address": "Rua Alvarenga, Ouro Preto, MG"},
+    # {"id": "flores", "address": "Rua das Flores, Ouro Preto, MG"},
+    # {"id": "conceicao", "address": "Rua da Conceição, Ouro Preto, MG"},
     {"id": "ouro", "address": "Rua do Ouro, Ouro Preto, MG"},
     {"id": "cruz", "address": "Rua da Cruz, Ouro Preto, MG"},
     {"id": "rosario", "address": "Rua do Rosário, Ouro Preto, MG"},
@@ -627,33 +804,33 @@ DEFAULT_OURO_PRETO_PLACES = [
     {"id": "simao_lacerda", "address": "Rua Simão Lacerda, Ouro Preto, MG"},
     {"id": "hugo_soderi", "address": "Rua Hugo Soderi, Ouro Preto, MG"},
     {"id": "domingos_mendes", "address": "Rua Domingos Mendes, Ouro Preto, MG"},
-    {"id": "cristo_rei", "address": "Rua Cristo Rei, Ouro Preto, MG"},
-    {"id": "alberto_ansaloni", "address": "Rua Alberto Ansaloni, Ouro Preto, MG"},
-    {"id": "rua_quatorze", "address": "Rua Quatorze, Ouro Preto, MG"},
-    {"id": "rua_onze", "address": "Rua Onze, Ouro Preto, MG"},
-    {"id": "rua_dois", "address": "Rua Dois, Ouro Preto, MG"},
-    {"id": "rua_tres", "address": "Rua Três, Ouro Preto, MG"},
-    {"id": "rua_quatro", "address": "Rua Quatro, Ouro Preto, MG"},
-    {"id": "rua_nove", "address": "Rua Nove, Ouro Preto, MG"},
-    {"id": "joao_fernandes_vieira", "address": "Rua João Fernandes Vieira, Ouro Preto, MG"},
-    {"id": "jose_aureliano_leocadio", "address": "Rua José Aureliano Leocádio, Ouro Preto, MG"},
-    {"id": "professor_paulo_magalhaes_gomes", "address": "Rua Professor Paulo Magalhães Gomes, Ouro Preto, MG"},
-    {"id": "rua_alfa", "address": "Rua Alfa, Ouro Preto, MG"},
-    {"id": "perimetral", "address": "Rua Perimetral, Ouro Preto, MG"},
-    {"id": "itacolomi", "address": "Rua Itacolomi, Ouro Preto, MG"},
-    {"id": "amaro_lanari", "address": "Rua Amaro Lanari, Ouro Preto, MG"},
-    {"id": "lucio", "address": "Rua Lúcio, Ouro Preto, MG"},
-    {"id": "professor_geraldo_nunes", "address": "Rua Professor Geraldo Nunes, Ouro Preto, MG"},
-    {"id": "alexandre_kassis", "address": "Rua Alexandre Kassis, Ouro Preto, MG"},
-    {"id": "geraldo_quirino_ribeiro", "address": "Rua Geraldo Quirino Ribeiro, Ouro Preto, MG"},
-    {"id": "vereador_paulo_elias", "address": "Rua Vereador Paulo Elías, Ouro Preto, MG"},
-    {"id": "alvaro_guimaraes_bressan", "address": "Rua Álvaro Guimarães Bressan, Ouro Preto, MG"},
-    {"id": "juscelino_kubitscheck", "address": "Avenida Juscelino Kubitscheck, Ouro Preto, MG"},
-    {"id": "rua_um", "address": "Rua Um, Ouro Preto, MG"},
-    {"id": "rodovia_dos_inconfidentes", "address": "Rodovia dos Inconfidentes, Ouro Preto, MG"},
-    {"id": "jussara_gabriele", "address": "Rua Jussara Gabriele, Ouro Preto, MG"},
-    {"id": "oriente", "address": "Rua Oriente, Ouro Preto, MG"},
-    {"id": "heli_coelho_neto", "address": "Rua Heli Coelho Neto, Ouro Preto, MG"},
+    # {"id": "cristo_rei", "address": "Rua Cristo Rei, Ouro Preto, MG"},
+    # {"id": "alberto_ansaloni", "address": "Rua Alberto Ansaloni, Ouro Preto, MG"},
+    # {"id": "rua_quatorze", "address": "Rua Quatorze, Ouro Preto, MG"},
+    # {"id": "rua_onze", "address": "Rua Onze, Ouro Preto, MG"},
+    # {"id": "rua_dois", "address": "Rua Dois, Ouro Preto, MG"},
+    # {"id": "rua_tres", "address": "Rua Três, Ouro Preto, MG"},
+    # {"id": "rua_quatro", "address": "Rua Quatro, Ouro Preto, MG"},
+    # {"id": "rua_nove", "address": "Rua Nove, Ouro Preto, MG"},
+    # {"id": "joao_fernandes_vieira", "address": "Rua João Fernandes Vieira, Ouro Preto, MG"},
+    # {"id": "jose_aureliano_leocadio", "address": "Rua José Aureliano Leocádio, Ouro Preto, MG"},
+    # {"id": "professor_paulo_magalhaes_gomes", "address": "Rua Professor Paulo Magalhães Gomes, Ouro Preto, MG"},
+    # {"id": "rua_alfa", "address": "Rua Alfa, Ouro Preto, MG"},
+    # {"id": "perimetral", "address": "Rua Perimetral, Ouro Preto, MG"},
+    # {"id": "itacolomi", "address": "Rua Itacolomi, Ouro Preto, MG"},
+    # {"id": "amaro_lanari", "address": "Rua Amaro Lanari, Ouro Preto, MG"},
+    # {"id": "lucio", "address": "Rua Lúcio, Ouro Preto, MG"},
+    # {"id": "professor_geraldo_nunes", "address": "Rua Professor Geraldo Nunes, Ouro Preto, MG"},
+    # {"id": "alexandre_kassis", "address": "Rua Alexandre Kassis, Ouro Preto, MG"},
+    # {"id": "geraldo_quirino_ribeiro", "address": "Rua Geraldo Quirino Ribeiro, Ouro Preto, MG"},
+    # {"id": "vereador_paulo_elias", "address": "Rua Vereador Paulo Elías, Ouro Preto, MG"},
+    # {"id": "alvaro_guimaraes_bressan", "address": "Rua Álvaro Guimarães Bressan, Ouro Preto, MG"},
+    # {"id": "juscelino_kubitscheck", "address": "Avenida Juscelino Kubitscheck, Ouro Preto, MG"},
+    # {"id": "rua_um", "address": "Rua Um, Ouro Preto, MG"},
+    # {"id": "rodovia_dos_inconfidentes", "address": "Rodovia dos Inconfidentes, Ouro Preto, MG"},
+    # {"id": "jussara_gabriele", "address": "Rua Jussara Gabriele, Ouro Preto, MG"},
+    # {"id": "oriente", "address": "Rua Oriente, Ouro Preto, MG"},
+    # {"id": "heli_coelho_neto", "address": "Rua Heli Coelho Neto, Ouro Preto, MG"},
 ]
 
 
@@ -661,21 +838,35 @@ def build_ouro_preto_example(
     api_key: Optional[str] = None,
     use_cache: bool = True,
     force_rebuild: bool = False,
+    fetch_distances: bool = True,
+    use_elevation: bool = True,
+    use_roughness: bool = True,
+    use_osm_connectivity: bool = True,
 ) -> nx.DiGraph:
     """
-    Gera o grafo de Ouro Preto a partir do Google Maps (Geocoding + Directions).
+    Gera o grafo de Ouro Preto a partir de Geocoding (endereço → lat/long) e conexões (Overpass).
     Na primeira execução salva em cache/grafo_ouro_preto.gpickle; nas seguintes carrega do cache.
 
-    - api_key: opcional; se não informada, usa GOOGLE_MAPS_API_KEY.
+    - api_key: opcional; se não informada, usa GOOGLE_MAPS_API_KEY (necessária para Geocoding).
     - use_cache: se True (padrão), carrega/grava em cache/.
     - force_rebuild: se True, ignora cache e reconstrói via API.
+    - fetch_distances: se True (padrão), obtém distância entre nós via Google Directions. Se False,
+      só constrói o grafo com Geocoding e Overpass (conexões); distância das arestas = linha reta em metros.
     - Inclui somente ruas da sede (centro histórico e arredores), sem pontos de interesse.
     """
     if use_cache and not force_rebuild and _CACHE_OURO_PRETO.is_file():
         with open(_CACHE_OURO_PRETO, "rb") as f:
             return pickle.load(f)
     print("Building Ouro Preto graph from Google Maps...")
-    G = build_graph_from_google_maps(DEFAULT_OURO_PRETO_PLACES, api_key=api_key)
+    G = build_graph_from_google_maps(
+        DEFAULT_OURO_PRETO_PLACES,
+        api_key=api_key,
+        fetch_distances=fetch_distances,
+        use_elevation=use_elevation,
+        use_roughness=use_roughness,
+        use_osm_connectivity=use_osm_connectivity,
+        use_cache=use_cache,
+    )
     if use_cache:
         _CACHE_DIR.mkdir(parents=True, exist_ok=True)
         with open(_CACHE_OURO_PRETO, "wb") as f:
@@ -683,3 +874,406 @@ def build_ouro_preto_example(
         print(f"Grafo Ouro Preto salvo em {_CACHE_OURO_PRETO}")
     return G
 
+# Tempo de espera (segundos) antes de retentar uma consulta Overpass que falhou
+_OVERPASS_RETRY_DELAY_SEC = 10
+# Para 429 (rate limit) ou 504 (gateway timeout): espera 30s e não conta como retentativa
+_OVERPASS_RATE_LIMIT_DELAY_SEC = 30
+# Número máximo de retentativas; após isso ignora e retorna None (chamador segue para o próximo)
+_OVERPASS_MAX_RETRIES = 5
+
+
+def _overpass_post(query: str, timeout: int = 90, url: str = OVERPASS_API_URL) -> Optional[Dict[str, Any]]:
+    """Envia query à Overpass API e retorna o JSON ou None em caso de erro. 429/504: espera 30s sem contar retry; outros erros: 10s até 5 retentativas."""
+    last_error: Optional[Exception] = None
+    retry_count = 0
+    while retry_count <= _OVERPASS_MAX_RETRIES:
+        try:
+            r = requests.post(url, data={"data": query}, timeout=timeout + 10)
+            r.raise_for_status()
+            data = r.json()
+            if data is not None:
+                return data
+        except requests.exceptions.HTTPError as e:
+            last_error = e
+            status = e.response.status_code if e.response is not None else None
+            if status in (429, 504):
+                print(f"  Overpass: {status} (rate limit/timeout), aguardando {_OVERPASS_RATE_LIMIT_DELAY_SEC}s (não contabiliza retentativa)...")
+                time.sleep(_OVERPASS_RATE_LIMIT_DELAY_SEC)
+                continue
+            print(f"  Overpass: erro na consulta — {type(e).__name__}: {e}")
+        except Exception as e:
+            last_error = e
+            print(f"  Overpass: erro na consulta — {type(e).__name__}: {e}")
+        retry_count += 1
+        if retry_count <= _OVERPASS_MAX_RETRIES:
+            print(f"  Overpass: tentativa {retry_count}/{_OVERPASS_MAX_RETRIES + 1}, aguardando {_OVERPASS_RETRY_DELAY_SEC}s para retentar...")
+            time.sleep(_OVERPASS_RETRY_DELAY_SEC)
+        else:
+            if last_error is not None:
+                print(f"  Overpass: ignorando após {_OVERPASS_MAX_RETRIES} retentativas (último erro: {last_error}), seguindo para o próximo.")
+            else:
+                print(f"  Overpass: ignorando após {_OVERPASS_MAX_RETRIES} retentativas, seguindo para o próximo.")
+    return None
+
+
+def _way_center_from_geometry(geometry: List[Dict[str, float]]) -> Tuple[float, float]:
+    """Calcula (lat, lng) do centro de uma way a partir da lista geometry (Overpass)."""
+    if not geometry:
+        return (OURO_PRETO_REF_LAT, OURO_PRETO_REF_LNG)
+    lat_sum = sum(p.get("lat", 0) for p in geometry)
+    lon_sum = sum(p.get("lon", 0) for p in geometry)
+    n = len(geometry)
+    return (lat_sum / n, lon_sum / n)
+
+
+def _osm_ways_by_name(
+    street_name: str,
+    south: float, west: float, north: float, east: float,
+) -> List[Dict[str, Any]]:
+    """Retorna lista de ways OSM com o nome dado na bbox (cada item: id, name, nodes, geometry)."""
+    name_safe = street_name.replace('"', " ").strip()
+    if not name_safe:
+        return []
+    query = (
+        f'[out:json][timeout:60];'
+        f'way["name"="{name_safe}"]["highway"]({south},{west},{north},{east});'
+        "out body geom;"
+    )
+    data = _overpass_post(query)
+    if not data or "elements" not in data:
+        return []
+    out = []
+    for el in data["elements"]:
+        if el.get("type") != "way":
+            continue
+        tags = el.get("tags") or {}
+        name = tags.get("name") or ""
+        nodes = el.get("nodes") or []
+        geometry = el.get("geometry") or []
+        out.append({"id": el["id"], "name": name, "nodes": nodes, "geometry": geometry})
+    return out
+
+
+# Tamanho do lote de way IDs por request Overpass (menor = menos timeout/rate limit)
+_OSM_CONNECTED_WAYS_BATCH_SIZE = 40
+# Pausa entre lotes (segundos) para evitar rate limit do servidor Overpass
+_OSM_BATCH_DELAY_SEC = 1.5
+
+
+def _way_neighbors_cache_key(south: float, west: float, north: float, east: float, way_id: int) -> Tuple[float, float, float, float, int]:
+    """Chave hashável para cache de vizinhos de uma way (bbox arredondada + way_id)."""
+    return (round(south, 6), round(west, 6), round(north, 6), round(east, 6), way_id)
+
+
+def _get_way_neighbors_cached(
+    way_id: int,
+    south: float, west: float, north: float, east: float,
+    way_neighbors_cache: Dict[Tuple[float, float, float, float, int], List[Dict[str, Any]]],
+    cache_file: Path,
+    use_cache: bool,
+) -> Tuple[List[Dict[str, Any]], bool]:
+    """Retorna (ways conectadas à way_id na bbox, from_cache). Em cache hit não chama Overpass."""
+    key = _way_neighbors_cache_key(south, west, north, east, way_id)
+    if use_cache and key in way_neighbors_cache:
+        return (way_neighbors_cache[key], True)
+    result = _osm_ways_connected_to_way_ids([way_id], south, west, north, east)
+    if use_cache:
+        way_neighbors_cache[key] = result
+        _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        try:
+            with open(cache_file, "wb") as f:
+                pickle.dump(way_neighbors_cache, f)
+        except Exception:
+            pass
+    return (result, False)
+
+
+def _osm_ways_connected_to_way_ids(
+    way_ids: List[int],
+    south: float, west: float, north: float, east: float,
+) -> List[Dict[str, Any]]:
+    """Retorna ways (highway) que compartilham pelo menos um nó com alguma das way_ids, na bbox.
+    Faz requisições em lotes com pausa entre elas para evitar rate limit e timeout."""
+    if not way_ids:
+        return []
+    seen_ids: Set[int] = set()
+    out: List[Dict[str, Any]] = []
+    n_batches = (len(way_ids) + _OSM_CONNECTED_WAYS_BATCH_SIZE - 1) // _OSM_CONNECTED_WAYS_BATCH_SIZE
+    for i in range(0, len(way_ids), _OSM_CONNECTED_WAYS_BATCH_SIZE):
+        if i > 0:
+            time.sleep(_OSM_BATCH_DELAY_SEC)
+        batch = way_ids[i : i + _OSM_CONNECTED_WAYS_BATCH_SIZE]
+        ids_str = ",".join(str(w) for w in batch)
+        query = (
+            f'[out:json][timeout:120];'
+            f'way({ids_str})({south},{west},{north},{east});'
+            "node(w)->.n;"
+            f'way(bn.n)["highway"]({south},{west},{north},{east});'
+            "out body geom;"
+        )
+        data = _overpass_post(query)
+        if not data or "elements" not in data:
+            if n_batches > 1:
+                print(f"  Overpass: lote {i // _OSM_CONNECTED_WAYS_BATCH_SIZE + 1}/{n_batches} sem dados (timeout/erro)")
+            continue
+        for el in data["elements"]:
+            if el.get("type") != "way":
+                continue
+            wid = el["id"]
+            if wid in seen_ids:
+                continue
+            seen_ids.add(wid)
+            tags = el.get("tags") or {}
+            name = tags.get("name") or f"Way {el['id']}"
+            nodes = el.get("nodes") or []
+            geometry = el.get("geometry") or []
+            out.append({"id": wid, "name": name, "nodes": nodes, "geometry": geometry})
+    return out
+
+
+def _slug_from_name(name: str) -> str:
+    """Gera id de nó a partir de tags.name: minúsculas, espaços e caracteres especiais -> underscore."""
+    if not name or not str(name).strip():
+        return ""
+    s = str(name).strip().lower()
+    s = s.replace(" ", "_").replace("-", "_").replace(".", "_")
+    s = "".join(c if c.isalnum() or c == "_" else "_" for c in s)
+    while "__" in s:
+        s = s.replace("__", "_")
+    return s.strip("_")
+
+
+def _build_way_graph_from_ways(
+    ways_by_id: Dict[int, Dict[str, Any]],
+    node_to_way_ids: Dict[int, Set[int]],
+    ref_lat: float,
+    ref_lng: float,
+    default_slope_pct: float = 0.0,
+    default_roughness: float = 1.0,
+    default_volume_capacity_ratio: float = 0.0,
+) -> nx.DiGraph:
+    """Monta DiGraph a partir de ways e mapa nó->ways. Vértices usam tags.name como id (slug)."""
+    G = nx.DiGraph()
+    G.graph[KEY_RAIN_MULTIPLIER] = 1.0
+    G.graph[KEY_RAIN_MULTIPLIER_BY_REGION] = {}
+    G.graph[KEY_SLOPE_PENALTY_FACTOR] = 1.0
+    G.graph[KEY_CONGESTION_FACTOR] = 1.0
+    G.graph[KEY_CONGESTION_FACTOR_BY_REGION] = {}
+    G.graph[KEY_EDGE_OVERRIDE] = {}
+    G.graph[KEY_CONGESTION_FACTOR_BY_EDGE] = {}
+    G.graph[KEY_EDGE_COST_MULTIPLIER] = {}
+
+    way_id_to_node_id: Dict[int, str] = {}
+    used_slugs: Set[str] = set()
+
+    for wid, w in ways_by_id.items():
+        name = (w.get("name") or "").strip()
+        if name:
+            slug = _slug_from_name(name)
+            if not slug:
+                slug = f"op_w{wid}"
+            elif slug in used_slugs:
+                slug = f"{slug}_{wid}"
+            used_slugs.add(slug)
+            nid = slug
+            label = nid  # nome exibido = id da rua em snake_case
+        else:
+            nid = f"passagem_{wid}"
+            used_slugs.add(nid)
+            label = nid  # nome exibido = id em snake_case
+        way_id_to_node_id[wid] = nid
+        lat, lng = _way_center_from_geometry(w.get("geometry") or [])
+        x, y = _lat_lng_to_xy_meters(lat, lng, ref_lat, ref_lng)
+        G.add_node(nid, pos=(x, y), label=label, lat=lat, lng=lng, region="op")
+
+    for node_osm_id, wids in node_to_way_ids.items():
+        wids_list = [w for w in wids if w in ways_by_id]
+        for i, wa in enumerate(wids_list):
+            for wb in wids_list[i + 1 :]:
+                nid_a, nid_b = way_id_to_node_id[wa], way_id_to_node_id[wb]
+                if nid_a == nid_b:
+                    continue
+                if not G.has_node(nid_a) or not G.has_node(nid_b):
+                    continue
+                lat_a, lng_a = _way_center_from_geometry(ways_by_id[wa].get("geometry") or [])
+                lat_b, lng_b = _way_center_from_geometry(ways_by_id[wb].get("geometry") or [])
+                dist = _straight_line_distance_meters(lat_a, lng_a, lat_b, lng_b, ref_lat, ref_lng)
+                dist = max(dist, 1e-6)
+                if not G.has_edge(nid_a, nid_b):
+                    G.add_edge(
+                        nid_a, nid_b,
+                        distance=dist,
+                        slope_pct=default_slope_pct,
+                        roughness=default_roughness,
+                        volume_capacity_ratio=default_volume_capacity_ratio,
+                    )
+                if not G.has_edge(nid_b, nid_a):
+                    G.add_edge(
+                        nid_b, nid_a,
+                        distance=dist,
+                        slope_pct=default_slope_pct,
+                        roughness=default_roughness,
+                        volume_capacity_ratio=default_volume_capacity_ratio,
+                    )
+    return G
+
+
+def _expand_op_graph_tail(
+    bbox: Tuple[float, float, float, float],
+    frontier: List[int],
+    seen_way_ids: Set[int],
+    ways_by_id: Dict[int, Dict[str, Any]],
+    node_to_way_ids: Dict[int, Set[int]],
+    current_level: int,
+    max_level: int,
+    way_neighbors_cache: Dict[Tuple[float, float, float, float, int], List[Dict[str, Any]]],
+    way_neighbors_cache_file: Path,
+    use_cache: bool,
+) -> None:
+    """
+    Expansão iterativa (BFS por níveis): a partir da fronteira atual (way ids),
+    obtém todos os vizinhos (ways que compartilham nó), adiciona ao grafo e
+    repete com a nova fronteira até atingir max_level ou fronteira vazia.
+    Usa cache incremental de vizinhos por way (arquivo em cache/). Mesmo contrato que a versão recursiva.
+    """
+    south, west, north, east = bbox
+    while current_level < max_level and frontier:
+        print(f"build_op_graph: iniciando nivel {current_level}/{max_level} — fronteira={len(frontier)} ways")
+        # Chamar Overpass (ou cache) para cada filho da fronteira (cada way), agregando resultados.
+        # Sleep apenas entre chamadas à API; itens em cache não disparam sleep.
+        connected: List[Dict[str, Any]] = []
+        seen_connected_ids: Set[int] = set()
+        previous_was_from_cache = True
+        for i, wid in enumerate(frontier):
+            if i > 0 and not previous_was_from_cache:
+                time.sleep(_OSM_BATCH_DELAY_SEC)
+            batch_result, from_cache = _get_way_neighbors_cached(
+                wid, south, west, north, east,
+                way_neighbors_cache, way_neighbors_cache_file, use_cache,
+            )
+            previous_was_from_cache = from_cache
+            for w in batch_result:
+                if w["id"] not in seen_connected_ids:
+                    seen_connected_ids.add(w["id"])
+                    connected.append(w)
+            # A cada 10 ways da fronteira processadas, exibir progresso
+            processed = i + 1
+            if processed % 10 == 0 or processed == len(frontier):
+                print(f"build_op_graph: nivel {current_level} — {processed}/{len(frontier)} ways da fronteira processadas")
+        next_frontier: List[int] = []
+        for w in connected:
+            wid = w["id"]
+            if wid not in seen_way_ids:
+                seen_way_ids.add(wid)
+                ways_by_id[wid] = w
+                next_frontier.append(wid)
+                for nid in w.get("nodes") or []:
+                    node_to_way_ids.setdefault(nid, set()).add(wid)
+        print(f"build_op_graph: nivel {current_level}/{max_level} — fronteira={len(frontier)} ways, vizinhos obtidos={len(connected)}, novos={len(next_frontier)}")
+        frontier = next_frontier
+        current_level += 1
+
+
+def build_op_graph(
+    levels: int = 4,
+    ref_lat: float = OURO_PRETO_REF_LAT,
+    ref_lng: float = OURO_PRETO_REF_LNG,
+    default_slope_pct: float = 0.0,
+    default_roughness: float = 1.0,
+    default_volume_capacity_ratio: float = 0.0,
+    use_cache: bool = True,
+    force_rebuild: bool = False,
+) -> nx.DiGraph:
+    """
+    Constrói grafo das ruas de Ouro Preto (sede) via OpenStreetMap (Overpass API).
+    Começa pela Rua Rio Piracicaba e expande por BFS: a cada nível, inclui ruas que compartilham
+    um nó com as ruas já mapeadas. Restringe à bbox de Ouro Preto (sem distritos vizinhos).
+
+    - levels: número de níveis de expansão (default 4). Nível 0 = só Rio Piracicaba; 1 = ruas que
+      tocam nela; 2 = ruas que tocam as do nível 1; etc.
+    - ref_lat, ref_lng: referência para pos (metros) e distâncias.
+    - default_*: atributos das arestas (slope_pct, roughness, volume_capacity_ratio).
+    - use_cache: se True (padrão), carrega/grava em cache/grafo_op_osm.gpickle.
+    - force_rebuild: se True, ignora cache e reconstrói via Overpass.
+
+    Retorna o mesmo tipo que build_ouro_preto_example: nx.DiGraph com nós (pos, label, lat, lng, region)
+    e arestas (distance, slope_pct, roughness, volume_capacity_ratio). IDs dos nós = slug de tags.name
+    (ex.: "rua_rio_piracicaba"); se name vazio ou duplicado, usa op_w<osm_way_id> ou nome_wid.
+    """
+    if use_cache and not force_rebuild and _CACHE_OP_GRAPH.is_file():
+        try:
+            with open(_CACHE_OP_GRAPH, "rb") as f:
+                G = pickle.load(f)
+            print(f"build_op_graph: carregado do cache ({G.number_of_nodes()} ruas, {G.number_of_edges()} arestas)")
+            return G
+        except Exception:
+            pass
+
+    south, west, north, east = OURO_PRETO_BBOX
+
+    # Ponto de partida: Rua Rio Piracicaba (tentar nomes comuns no OSM)
+    start_names = ["Rua Rio Piracicaba", "Rio Piracicaba"]
+    seed_ways: List[Dict[str, Any]] = []
+    for name in start_names:
+        seed_ways = _osm_ways_by_name(name, south, west, north, east)
+        if seed_ways:
+            break
+    if not seed_ways:
+        raise ValueError("Nenhuma way 'Rua Rio Piracicaba' (ou 'Rio Piracicaba') encontrada na bbox de Ouro Preto. Verifique a bbox ou o nome no OSM.")
+
+    seen_way_ids: Set[int] = set()
+    ways_by_id: Dict[int, Dict[str, Any]] = {}
+    node_to_way_ids: Dict[int, Set[int]] = {}
+
+    for w in seed_ways:
+        wid = w["id"]
+        seen_way_ids.add(wid)
+        ways_by_id[wid] = w
+        for nid in w.get("nodes") or []:
+            node_to_way_ids.setdefault(nid, set()).add(wid)
+
+    # Cache incremental: vizinhos por way (carregar existente se use_cache)
+    way_neighbors_cache: Dict[Tuple[float, float, float, float, int], List[Dict[str, Any]]] = {}
+    if use_cache and _CACHE_OSM_WAY_NEIGHBORS.is_file():
+        try:
+            with open(_CACHE_OSM_WAY_NEIGHBORS, "rb") as f:
+                way_neighbors_cache = pickle.load(f)
+            print(f"build_op_graph: cache de vizinhos carregado ({len(way_neighbors_cache)} ways em cache)")
+        except Exception:
+            way_neighbors_cache = {}
+
+    # Expansão recursiva em cauda: a partir do ponto de partida, setar vizinhos e para cada um setar os seus
+    _expand_op_graph_tail(
+        (south, west, north, east),
+        list(seen_way_ids),
+        seen_way_ids,
+        ways_by_id,
+        node_to_way_ids,
+        current_level=1,
+        max_level=levels,
+        way_neighbors_cache=way_neighbors_cache,
+        way_neighbors_cache_file=_CACHE_OSM_WAY_NEIGHBORS,
+        use_cache=use_cache,
+    )
+
+    # Só manter nós que aparecem em pelo menos 2 ways (para arestas entre ways)
+    node_to_way_ids = {n: s for n, s in node_to_way_ids.items() if len(s) >= 2}
+
+    G = _build_way_graph_from_ways(
+        ways_by_id,
+        node_to_way_ids,
+        ref_lat, ref_lng,
+        default_slope_pct=default_slope_pct,
+        default_roughness=default_roughness,
+        default_volume_capacity_ratio=default_volume_capacity_ratio,
+    )
+    print(f"build_op_graph: {G.number_of_nodes()} ruas, {G.number_of_edges()} arestas (levels={levels})")
+    if use_cache:
+        _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        try:
+            with open(_CACHE_OP_GRAPH, "wb") as f:
+                pickle.dump(G, f)
+            print(f"Grafo OP (OSM) salvo em {_CACHE_OP_GRAPH}")
+        except Exception:
+            pass
+    return G
