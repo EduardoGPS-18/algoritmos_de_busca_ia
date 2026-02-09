@@ -16,7 +16,6 @@ for _candidate in [_root, _root.parent]:
 
 from .graph import (
     build_ouro_preto_example,
-    build_ouro_preto_mariana_cachoeira,
     get_edge_cost,
     get_weight_function,
     path_cost,
@@ -25,7 +24,6 @@ from .algorithms import dijkstra, a_star, d_star_lite
 
 __all__ = [
     "build_ouro_preto_example",
-    "build_ouro_preto_mariana_cachoeira",
     "get_edge_cost",
     "get_weight_function",
     "path_cost",

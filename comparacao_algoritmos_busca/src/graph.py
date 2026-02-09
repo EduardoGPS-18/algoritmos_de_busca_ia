@@ -31,6 +31,7 @@ KEY_RAIN_MULTIPLIER_BY_REGION = "rain_multiplier_by_region"
 KEY_SLOPE_PENALTY_FACTOR = "slope_penalty_factor"
 KEY_CONGESTION_FACTOR = "congestion_factor"
 KEY_CONGESTION_FACTOR_BY_REGION = "congestion_factor_by_region"
+KEY_CONGESTION_FACTOR_BY_EDGE = "congestion_factor_by_edge"
 KEY_EDGE_OVERRIDE = "edge_override"
 KEY_EDGE_COST_MULTIPLIER = "edge_cost_multiplier"
 
@@ -132,8 +133,8 @@ def get_weight_function(G: nx.DiGraph) -> Callable[[Any, Any, Dict], float]:
     """
     Retorna uma função (u, v, d) -> peso para uso em nx.dijkstra_path, nx.astar_path, etc.
     Usa G.graph para rain_multiplier, edge_override, etc.
-    Se rain_multiplier_by_region / congestion_factor_by_region estiverem definidos,
-    o custo da aresta (u, v) usa a região do nó de origem u (alguns bairros com chuva, outros não).
+    Chuva: por região do nó de origem u (rain_multiplier_by_region).
+    Congestionamento: por aresta (congestion_factor_by_edge); se não definido para (u,v), usa global.
     """
     override = G.graph.get(KEY_EDGE_OVERRIDE, {})
     edge_multiplier = G.graph.get(KEY_EDGE_COST_MULTIPLIER, {})
@@ -141,6 +142,7 @@ def get_weight_function(G: nx.DiGraph) -> Callable[[Any, Any, Dict], float]:
     rain_by_region = G.graph.get(KEY_RAIN_MULTIPLIER_BY_REGION, {})
     slope_factor = G.graph.get(KEY_SLOPE_PENALTY_FACTOR, 1.0)
     congestion_global = G.graph.get(KEY_CONGESTION_FACTOR, 1.0)
+    congestion_by_edge = G.graph.get(KEY_CONGESTION_FACTOR_BY_EDGE, {})
     congestion_by_region = G.graph.get(KEY_CONGESTION_FACTOR_BY_REGION, {})
 
     def weight(u: Any, v: Any, d: Dict) -> float:
@@ -149,7 +151,8 @@ def get_weight_function(G: nx.DiGraph) -> Callable[[Any, Any, Dict], float]:
             return override[key]
         region = _get_region_from_graph(G, u)
         rain = rain_by_region.get(region, rain_global)
-        congestion = congestion_by_region.get(region, congestion_global)
+        # Congestionamento por via (aresta) tem prioridade; senão, fallback por região e global
+        congestion = congestion_by_edge.get(key, congestion_by_region.get(region, congestion_global))
         base = _compute_edge_cost(d, rain, slope_factor, congestion)
         return base * edge_multiplier.get(key, 1.0)
 
@@ -162,6 +165,23 @@ def get_edge_cost(G: nx.DiGraph, u: Any, v: Any) -> float:
         return float("inf")
     wf = get_weight_function(G)
     return wf(u, v, G.edges[u, v])
+
+
+def validate_path_nodes(G: nx.DiGraph, start: Any, goal: Any) -> None:
+    """
+    Levanta NetworkXError se start ou goal não existirem no grafo.
+    Mensagem sugere verificar list(G.nodes()) e diferencia grafo exemplo vs regional.
+    """
+    missing = [n for n in (start, goal) if n not in G]
+    if not missing:
+        return
+    nodes_list = list(G.nodes())[:15]
+    hint = (
+        "Grafo exemplo (build_ouro_preto_example): use START='praca_tiradentes', GOAL='campus'. "
+        "Grafo regional (build_ouro_preto_mariana_cachoeira): use START='op_tiradentes', GOAL='op_campus' ou "
+        "START='op_tiradentes', GOAL='mariana_centro'. Nós neste grafo: "
+    ) + str(nodes_list) + ("..." if len(G) > 15 else "")
+    raise nx.NetworkXError(f"Nó(s) {missing} não existem no grafo. {hint}")
 
 
 def get_straight_line_distance(G: nx.DiGraph, u: Any, v: Any) -> float:
@@ -204,6 +224,19 @@ def _lat_lng_to_xy_meters(lat: float, lng: float, ref_lat: float, ref_lng: float
 
 def _geocode(api_key: str, address: str) -> Optional[Tuple[float, float]]:
     """Obtém (lat, lng) de um endereço via Google Geocoding API."""
+    result = _geocode_with_components(api_key, address)
+    return (result[0], result[1]) if result else None
+
+
+def _geocode_with_components(
+    api_key: str, address: str
+) -> Optional[Tuple[float, float, str, str]]:
+    """
+    Obtém (lat, lng, bairro, estado) via Google Geocoding API.
+    bairro = long_name de sublocality_level_1/sublocality/neighborhood (como vem do Google).
+    estado = short_name de administrative_area_level_1 (2 caracteres, ex: MG).
+    Retorna None se falhar; bairro/estado vazios se não encontrados.
+    """
     url = "https://maps.googleapis.com/maps/api/geocode/json"
     params = {"address": address, "key": api_key}
     try:
@@ -212,8 +245,25 @@ def _geocode(api_key: str, address: str) -> Optional[Tuple[float, float]]:
         data = r.json()
         if data.get("status") != "OK" or not data.get("results"):
             return None
-        loc = data["results"][0]["geometry"]["location"]
-        return (loc["lat"], loc["lng"])
+        res = data["results"][0]
+        loc = res["geometry"]["location"]
+        lat, lng = loc["lat"], loc["lng"]
+        bairro = ""
+        estado = ""
+        for comp in res.get("address_components", []):
+            types = comp.get("types", [])
+            if "administrative_area_level_1" in types:
+                estado = (comp.get("short_name") or comp.get("long_name", ""))[:2]
+            if not bairro and any(t in types for t in ("sublocality_level_1", "sublocality", "neighborhood")):
+                bairro = comp.get("long_name", "")
+        if not bairro:
+            for comp in res.get("address_components", []):
+                if "locality" in comp.get("types", []):
+                    bairro = comp.get("long_name", "")
+                    break
+        if not bairro:
+            bairro = res.get("formatted_address", address).split(",")[0].strip()
+        return (lat, lng, bairro, estado)
     except Exception:
         return None
 
@@ -494,8 +544,8 @@ def build_graph_from_google_maps(
                 dist = cache["directions"][dkey]
             else:
                 dist = _get_route_distance_meters(key, coords[orig_id], coords[dest_id])
-                if use_cache and dist is not None:
-                    cache["directions"][dkey] = dist
+                if use_cache:
+                    cache["directions"][dkey] = dist  # sempre grava (dados Google ou None = não existe caminho)
             if dist is not None and dist > 0:
                 G.add_edge(
                     orig_id,
@@ -525,30 +575,85 @@ def build_graph_from_google_maps(
     return G
 
 
-# Lista padrão de pontos de interesse e bairros da SEDE de Ouro Preto (Lei 1.181/2020).
-# Apenas sede do município; não inclui distritos (Mariana, Cachoeira do Campo, Lavras Novas, etc.).
+# Lista padrão: somente ruas da sede de Ouro Preto, MG (sem pontos de interesse).
+# Mapeamento: id -> endereço para geocoding e grafo. Duplicatas por (lat, lng) removidas.
+# Lista padrão: somente ruas da sede de Ouro Preto, MG (sem pontos de interesse).
+# Mapeamento: id -> endereço para geocoding e grafo. Duplicatas por (lat, lng) removidas.
 DEFAULT_OURO_PRETO_PLACES = [
-    # Pontos de interesse e ruas
-    {"id": "praca_tiradentes", "address": "Praça Tiradentes, Ouro Preto, MG"},
-    {"id": "terminal", "address": "Terminal Rodoviário de Ouro Preto, MG"},
-    {"id": "campus", "address": "Universidade Federal de Ouro Preto, Morro do Cruzeiro, Ouro Preto, MG"},
     {"id": "sao_jose", "address": "Rua São José, Ouro Preto, MG"},
-    {"id": "diogo_vasconcelos", "address": "Rua Conde de Bobadela (Diogo de Vasconcelos), Ouro Preto, MG"},
+    {"id": "conde_bobadela", "address": "Rua Conde de Bobadela, Ouro Preto, MG"},
     {"id": "rua_pilar", "address": "Rua do Pilar, Ouro Preto, MG"},
     {"id": "xavier_veiga", "address": "Rua Xavier da Veiga, Ouro Preto, MG"},
+    {"id": "padre_rolim", "address": "Rua Padre Rolim, Ouro Preto, MG"},
+    {"id": "claudio_manoel", "address": "Rua Cláudio Manoel, Ouro Preto, MG"},
+    {"id": "conselheiro_quintiliano", "address": "Rua Conselheiro Quintiliano, Ouro Preto, MG"},
+    {"id": "paulistas", "address": "Rua dos Paulistas, Ouro Preto, MG"},
+    {"id": "getulio_vargas", "address": "Rua Getúlio Vargas, Ouro Preto, MG"},
+    {"id": "henri_gorceix", "address": "Rua Henri Gorceix, Ouro Preto, MG"},
+    {"id": "joao_de_paiva", "address": "Rua João de Paiva, Ouro Preto, MG"},
+    {"id": "teixeira_amaral", "address": "Rua Teixeira Amaral, Ouro Preto, MG"},
+    {"id": "coronel_alves", "address": "Rua Coronel Alves, Ouro Preto, MG"},
+    {"id": "conego_trindade", "address": "Rua Cônego Trindade, Ouro Preto, MG"},
+    {"id": "direita", "address": "Rua Direita, Ouro Preto, MG"},
+    {"id": "bernardo_vasconcelos", "address": "Rua Bernardo Vasconcelos, Ouro Preto, MG"},
+    {"id": "sao_francisco_assis", "address": "Rua São Francisco de Assis, Ouro Preto, MG"},
+    {"id": "dom_silverio", "address": "Rua Dom Silvério, Ouro Preto, MG"},
+    {"id": "camilo_brito", "address": "Rua Camilo de Brito, Ouro Preto, MG"},
+    {"id": "parana", "address": "Rua Paraná, Ouro Preto, MG"},
+    {"id": "alvarenga", "address": "Rua Alvarenga, Ouro Preto, MG"},
+    {"id": "flores", "address": "Rua das Flores, Ouro Preto, MG"},
+    {"id": "conceicao", "address": "Rua da Conceição, Ouro Preto, MG"},
+    {"id": "ouro", "address": "Rua do Ouro, Ouro Preto, MG"},
+    {"id": "cruz", "address": "Rua da Cruz, Ouro Preto, MG"},
+    {"id": "rosario", "address": "Rua do Rosário, Ouro Preto, MG"},
+    {"id": "merces", "address": "Rua das Mercês, Ouro Preto, MG"},
+    {"id": "chafariz", "address": "Rua do Chafariz, Ouro Preto, MG"},
+    {"id": "prata", "address": "Rua da Prata, Ouro Preto, MG"},
+    {"id": "sao_miguel", "address": "Rua São Miguel, Ouro Preto, MG"},
+    {"id": "santa_rita", "address": "Rua Santa Rita, Ouro Preto, MG"},
+    {"id": "lajes", "address": "Rua das Lajes, Ouro Preto, MG"},
     {"id": "ladeira_barra", "address": "Ladeira da Barra, Ouro Preto, MG"},
-    # Bairros da sede (não distritos)
-    {"id": "centro", "address": "Bairro Centro, Ouro Preto, MG"},
-    {"id": "antonio_dias", "address": "Bairro Antônio Dias, Ouro Preto, MG"},
-    {"id": "pilar", "address": "Bairro Pilar, Ouro Preto, MG"},
-    {"id": "morro_santana", "address": "Bairro Morro Santana, Ouro Preto, MG"},
-    {"id": "cabecas", "address": "Bairro Cabeças, Ouro Preto, MG"},
-    {"id": "lagoa", "address": "Bairro Lagoa, Ouro Preto, MG"},
-    {"id": "nossa_senhora_carmo", "address": "Bairro Nossa Senhora do Carmo, Ouro Preto, MG"},
-    {"id": "bauxita", "address": "Bairro Bauxita, Ouro Preto, MG"},
-    {"id": "vila_operaria", "address": "Bairro Vila Operária, Ouro Preto, MG"},
-    {"id": "morro_cruzeiro", "address": "Bairro Morro do Cruzeiro, Ouro Preto, MG"},
-    {"id": "barra", "address": "Bairro Barra, Ouro Preto, MG"},
+    {"id": "ladeira_santa_efigenia", "address": "Ladeira de Santa Efigênia, Ouro Preto, MG"},
+    {"id": "ladeira_custodio", "address": "Ladeira do Custódio, Ouro Preto, MG"},
+    {"id": "ladeira_piedade", "address": "Ladeira da Piedade, Ouro Preto, MG"},
+    {"id": "morro_da_queimada", "address": "Rua Morro da Queimada, Ouro Preto, MG"},
+    {"id": "rio_piracicaba", "address": "Rua Rio Piracicaba, Ouro Preto, MG"},
+    {"id": "rio_itabira", "address": "Rua Rio Itabira, Ouro Preto, MG"},
+    {"id": "treze_maio", "address": "Rua Treze de Maio, Ouro Preto, MG"},
+    {"id": "vinte_e_quatro_de_junho", "address": "Rua Vinte e Quatro de Junho, Ouro Preto, MG"},
+    {"id": "quinze_de_agosto", "address": "Rua Quinze de Agosto, Ouro Preto, MG"},
+    {"id": "santos_dumont", "address": "Rua Santos Dumont, Ouro Preto, MG"},
+    {"id": "americo_rene_gianetti", "address": "Avenida Américo Renê Gianetti, Ouro Preto, MG"},
+    {"id": "simao_lacerda", "address": "Rua Simão Lacerda, Ouro Preto, MG"},
+    {"id": "hugo_soderi", "address": "Rua Hugo Soderi, Ouro Preto, MG"},
+    {"id": "domingos_mendes", "address": "Rua Domingos Mendes, Ouro Preto, MG"},
+    {"id": "cristo_rei", "address": "Rua Cristo Rei, Ouro Preto, MG"},
+    {"id": "alberto_ansaloni", "address": "Rua Alberto Ansaloni, Ouro Preto, MG"},
+    {"id": "rua_quatorze", "address": "Rua Quatorze, Ouro Preto, MG"},
+    {"id": "rua_onze", "address": "Rua Onze, Ouro Preto, MG"},
+    {"id": "rua_dois", "address": "Rua Dois, Ouro Preto, MG"},
+    {"id": "rua_tres", "address": "Rua Três, Ouro Preto, MG"},
+    {"id": "rua_quatro", "address": "Rua Quatro, Ouro Preto, MG"},
+    {"id": "rua_nove", "address": "Rua Nove, Ouro Preto, MG"},
+    {"id": "joao_fernandes_vieira", "address": "Rua João Fernandes Vieira, Ouro Preto, MG"},
+    {"id": "jose_aureliano_leocadio", "address": "Rua José Aureliano Leocádio, Ouro Preto, MG"},
+    {"id": "professor_paulo_magalhaes_gomes", "address": "Rua Professor Paulo Magalhães Gomes, Ouro Preto, MG"},
+    {"id": "rua_alfa", "address": "Rua Alfa, Ouro Preto, MG"},
+    {"id": "perimetral", "address": "Rua Perimetral, Ouro Preto, MG"},
+    {"id": "itacolomi", "address": "Rua Itacolomi, Ouro Preto, MG"},
+    {"id": "amaro_lanari", "address": "Rua Amaro Lanari, Ouro Preto, MG"},
+    {"id": "lucio", "address": "Rua Lúcio, Ouro Preto, MG"},
+    {"id": "professor_geraldo_nunes", "address": "Rua Professor Geraldo Nunes, Ouro Preto, MG"},
+    {"id": "alexandre_kassis", "address": "Rua Alexandre Kassis, Ouro Preto, MG"},
+    {"id": "geraldo_quirino_ribeiro", "address": "Rua Geraldo Quirino Ribeiro, Ouro Preto, MG"},
+    {"id": "vereador_paulo_elias", "address": "Rua Vereador Paulo Elías, Ouro Preto, MG"},
+    {"id": "alvaro_guimaraes_bressan", "address": "Rua Álvaro Guimarães Bressan, Ouro Preto, MG"},
+    {"id": "juscelino_kubitscheck", "address": "Avenida Juscelino Kubitscheck, Ouro Preto, MG"},
+    {"id": "rua_um", "address": "Rua Um, Ouro Preto, MG"},
+    {"id": "rodovia_dos_inconfidentes", "address": "Rodovia dos Inconfidentes, Ouro Preto, MG"},
+    {"id": "jussara_gabriele", "address": "Rua Jussara Gabriele, Ouro Preto, MG"},
+    {"id": "oriente", "address": "Rua Oriente, Ouro Preto, MG"},
+    {"id": "heli_coelho_neto", "address": "Rua Heli Coelho Neto, Ouro Preto, MG"},
 ]
 
 
@@ -564,7 +669,7 @@ def build_ouro_preto_example(
     - api_key: opcional; se não informada, usa GOOGLE_MAPS_API_KEY.
     - use_cache: se True (padrão), carrega/grava em cache/.
     - force_rebuild: se True, ignora cache e reconstrói via API.
-    - Inclui pontos de interesse e bairros da SEDE (não distritos).
+    - Inclui somente ruas da sede (centro histórico e arredores), sem pontos de interesse.
     """
     if use_cache and not force_rebuild and _CACHE_OURO_PRETO.is_file():
         with open(_CACHE_OURO_PRETO, "rb") as f:
@@ -578,74 +683,3 @@ def build_ouro_preto_example(
         print(f"Grafo Ouro Preto salvo em {_CACHE_OURO_PRETO}")
     return G
 
-
-# Cenário regional: Ouro Preto (sede) + Mariana (município vizinho) + Cachoeira do Campo (distrito de Ouro Preto)
-DEFAULT_OURO_PRETO_MARIANA_CACHOEIRA_PLACES = [
-    # Ouro Preto (sede) — pontos de interesse e bairros
-    {"id": "op_tiradentes", "address": "Praça Tiradentes, Ouro Preto, MG"},
-    {"id": "op_terminal", "address": "Terminal Rodoviário de Ouro Preto, MG"},
-    {"id": "op_campus", "address": "Universidade Federal de Ouro Preto, Morro do Cruzeiro, Ouro Preto, MG"},
-    {"id": "op_centro", "address": "Bairro Centro, Ouro Preto, MG"},
-    {"id": "op_antonio_dias", "address": "Bairro Antônio Dias, Ouro Preto, MG"},
-    {"id": "op_pilar", "address": "Bairro Pilar, Ouro Preto, MG"},
-    {"id": "op_morro_santana", "address": "Bairro Morro Santana, Ouro Preto, MG"},
-    {"id": "op_cabecas", "address": "Bairro Cabeças, Ouro Preto, MG"},
-    {"id": "op_lagoa", "address": "Bairro Lagoa, Ouro Preto, MG"},
-    {"id": "op_nossa_senhora_carmo", "address": "Bairro Nossa Senhora do Carmo, Ouro Preto, MG"},
-    {"id": "op_bauxita", "address": "Bairro Bauxita, Ouro Preto, MG"},
-    {"id": "op_vila_operaria", "address": "Bairro Vila Operária, Ouro Preto, MG"},
-    {"id": "op_morro_cruzeiro", "address": "Bairro Morro do Cruzeiro, Ouro Preto, MG"},
-    {"id": "op_barra", "address": "Bairro Barra, Ouro Preto, MG"},
-    # Mariana (município vizinho) — centro e bairros da sede
-    {"id": "mariana_centro", "address": "Centro, Mariana, MG"},
-    {"id": "mariana_praca", "address": "Praça Minas Gerais, Mariana, MG"},
-    {"id": "mariana_terminal", "address": "Terminal Rodoviário de Mariana, MG"},
-    {"id": "mariana_alvorada", "address": "Bairro Alvorada, Mariana, MG"},
-    {"id": "mariana_rosario", "address": "Bairro Rosário, Mariana, MG"},
-    {"id": "mariana_santa_clara", "address": "Bairro Santa Clara, Mariana, MG"},
-    {"id": "mariana_santana", "address": "Bairro Santana, Mariana, MG"},
-    {"id": "mariana_vila_rica", "address": "Bairro Vila Rica, Mariana, MG"},
-    {"id": "mariana_jardim_santana", "address": "Jardim Santana, Mariana, MG"},
-    {"id": "mariana_liberdade", "address": "Bairro Liberdade, Mariana, MG"},
-    # Cachoeira do Campo (distrito de Ouro Preto)
-    {"id": "cachoeira_centro", "address": "Cachoeira do Campo, Ouro Preto, MG"},
-    {"id": "cachoeira_igreja", "address": "Igreja Nossa Senhora da Conceição, Cachoeira do Campo, Ouro Preto, MG"},
-    {"id": "cachoeira_praca_coronel", "address": "Praça Coronel Ramos, Cachoeira do Campo, Ouro Preto, MG"},
-    {"id": "cachoeira_dom_bosco", "address": "Colégio Dom Bosco, Cachoeira do Campo, Ouro Preto, MG"},
-    {"id": "cachoeira_praca_dom_bosco", "address": "Praça Dom Bosco, Cachoeira do Campo, Ouro Preto, MG"},
-]
-
-
-def build_ouro_preto_mariana_cachoeira(
-    api_key: Optional[str] = None,
-    use_cache: bool = True,
-    force_rebuild: bool = False,
-) -> nx.DiGraph:
-    """
-    Gera o grafo do cenário regional: Ouro Preto (sede) + Mariana + Cachoeira do Campo.
-    Na primeira execução salva em cache/grafo_regional.gpickle; nas seguintes carrega do cache.
-
-    - api_key: opcional; se não informada, usa GOOGLE_MAPS_API_KEY.
-    - use_cache: se True (padrão), carrega/grava em cache/.
-    - force_rebuild: se True, ignora cache e reconstrói via API.
-    - Inclui Ouro Preto, Mariana e Cachoeira do Campo (bairros e pontos de interesse).
-    """
-    key = api_key or os.environ.get("GOOGLE_MAPS_API_KEY")
-    if not key:
-        raise ValueError(
-            "API key do Google Maps não informada. Passe api_key ou defina GOOGLE_MAPS_API_KEY no ambiente."
-        )
-    if use_cache and not force_rebuild and _CACHE_REGIONAL.is_file():
-        with open(_CACHE_REGIONAL, "rb") as f:
-            return pickle.load(f)
-    print(f"Building regional graph (Ouro Preto + Mariana + Cachoeira do Campo) with API key: {key[:10]}...")
-    G = build_graph_from_google_maps(
-        DEFAULT_OURO_PRETO_MARIANA_CACHOEIRA_PLACES,
-        api_key=key,
-    )
-    if use_cache:
-        _CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        with open(_CACHE_REGIONAL, "wb") as f:
-            pickle.dump(G, f)
-        print(f"Grafo regional salvo em {_CACHE_REGIONAL}")
-    return G

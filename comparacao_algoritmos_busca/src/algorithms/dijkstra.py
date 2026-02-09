@@ -11,7 +11,7 @@ from typing import List, Optional, Tuple
 
 import networkx as nx
 
-from ..graph import get_edge_cost, path_cost
+from ..graph import get_edge_cost, path_cost, validate_path_nodes
 
 
 def dijkstra(
@@ -26,6 +26,7 @@ def dijkstra(
     Implementação manual: dist[] e prev[]; fila (dist, nó) com heapq;
     a cada passo expande o nó com menor distância atual e relaxa as arestas.
     """
+    validate_path_nodes(G, start, goal)
     dist: dict[str, float] = {start: 0.0}
     prev: dict[str, Optional[str]] = {start: None}
     heap: List[Tuple[float, str]] = [(0.0, start)]

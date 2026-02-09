@@ -5,7 +5,7 @@ Helpers para exibição e manipulação de grafos (Dash Cytoscape, posições, e
 from __future__ import annotations
 
 import math
-from typing import TYPE_CHECKING, Any, Dict, List, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
 
 import dash_cytoscape as cyto
 from dash import Dash, Input, Output, html
@@ -14,13 +14,62 @@ if TYPE_CHECKING:
     import networkx as nx
 
 
+def _escape_cytoscape_id(node_id: str) -> str:
+    """Escapa id de nó para uso em seletor Cytoscape (ex.: pontos viram \\.)."""
+    return node_id.replace("\\", "\\\\").replace(".", "\\.").replace(":", "\\:")
+
+
+# Raio mínimo em px ao redor de cada nó no spawn (distância centro a centro >= 2 * NODE_SPAWN_RADIUS)
+NODE_SPAWN_RADIUS_PX: float = 30.0
+
+# Canvas em pixels para layout (posições do grafo são escaladas para este tamanho antes do spread)
+_LAYOUT_CANVAS_WIDTH: float = 800.0
+_LAYOUT_CANVAS_HEIGHT: float = 600.0
+_LAYOUT_PADDING: float = 40.0
+
+
+def _scale_positions_to_canvas(
+    pos_dict: Dict[str, Tuple[float, float]],
+    width: float = _LAYOUT_CANVAS_WIDTH,
+    height: float = _LAYOUT_CANVAS_HEIGHT,
+    padding: float = _LAYOUT_PADDING,
+) -> Dict[str, Tuple[float, float]]:
+    """Escala posições (unidades do grafo, ex.: metros) para um canvas em pixels.
+    Assim o spread_positions com min_distance em px faz efeito na tela.
+    """
+    if not pos_dict:
+        return {}
+    xs = [p[0] for p in pos_dict.values()]
+    ys = [p[1] for p in pos_dict.values()]
+    min_x, max_x = min(xs), max(xs)
+    min_y, max_y = min(ys), max(ys)
+    range_x = max_x - min_x
+    range_y = max_y - min_y
+    if range_x < 1e-6:
+        range_x = 1.0
+    if range_y < 1e-6:
+        range_y = 1.0
+    inner_w = width - 2 * padding
+    inner_h = height - 2 * padding
+    out = {}
+    for n, (x, y) in pos_dict.items():
+        nx = padding + (x - min_x) / range_x * inner_w
+        ny = padding + (y - min_y) / range_y * inner_h
+        out[n] = (float(nx), float(ny))
+    return out
+
+
 def spread_positions(
     pos_dict: Dict[str, Tuple[float, float]],
-    min_distance: float = 400,
+    min_distance: Optional[float] = None,
     iterations: int = 8,
     factor: float = 0.4,
 ) -> Dict[str, Tuple[float, float]]:
-    """Afasta nós muito próximos mantendo o formato geral (evita sobreposição)."""
+    """Afasta nós muito próximos mantendo o formato geral (evita sobreposição).
+    min_distance: distância mínima centro a centro (px). Se None, usa 2 * NODE_SPAWN_RADIUS_PX.
+    """
+    if min_distance is None:
+        min_distance = 2.0 * NODE_SPAWN_RADIUS_PX
     pos = {n: (float(x), float(y)) for n, (x, y) in pos_dict.items()}
     for _ in range(iterations):
         disp = {n: (0.0, 0.0) for n in pos}
@@ -47,27 +96,79 @@ def _short_label(node_id: str, max_len: int = 18) -> str:
     return s
 
 
+# Abreviações de cidade no label (nome completo -> iniciais)
+_CITY_ABBREV: Dict[str, str] = {
+    "Cachoeira do Campo": "CdC",
+    "Ouro Preto": "OP",
+    "Mariana": "M",
+}
+
+
+def _abbreviate_city_in_label(text: str) -> str:
+    """Substitui o nome completo da cidade pelas iniciais no texto do label."""
+    out = str(text)
+    for full_name, initials in _CITY_ABBREV.items():
+        out = out.replace(full_name, initials)
+    return out
+
+
 def _build_cytoscape_elements(
     G: "nx.DiGraph",
     pos: Dict[str, Tuple[float, float]],
     edge_costs: Dict[Tuple[str, str], float],
     edge_tooltips: Dict[Tuple[str, str], str],
     cost_to_color: Any,
+    path_edges: Optional[Set[Tuple[str, str]]] = None,
+    start_node: Optional[str] = None,
+    goal_node: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    """Monta a lista de elementos (nós + arestas) no formato do Dash Cytoscape."""
+    """Monta a lista de elementos (nós + arestas) no formato do Dash Cytoscape.
+    Nós em regiões com chuva local (rain_multiplier_by_region > 1) ganham ícone 💧.
+    Arestas congestionadas (congestion_factor_by_edge > 1) ganham ícone 🚗 na via (desenhada à frente).
+    Se path_edges for passado, arestas do caminho recebem in_path=True (opacidade 100%); demais in_path=False (60%).
+    start_node e goal_node recebem classes para destaque (verde e vermelho).
+    Arestas com segunda cor (efeito listrado): use G.edges[u,v]['stripe_color'] = '#hex' ou
+    G.graph['striped_edges'] = {(u,v): '#hex', ...}; a linha principal fica sólida e uma camada tracejada
+    com a segunda cor é desenhada por baixo.
+    """
+    from src.graph import (
+        KEY_CONGESTION_FACTOR_BY_EDGE,
+        KEY_RAIN_MULTIPLIER_BY_REGION,
+        _get_region_from_graph,
+    )
+    rain_by_region = G.graph.get(KEY_RAIN_MULTIPLIER_BY_REGION, {})
+    congestion_by_edge = G.graph.get(KEY_CONGESTION_FACTOR_BY_EDGE, {})
     elements: List[Dict[str, Any]] = []
     for n in G.nodes():
         x, y = pos[n][0], pos[n][1]
-        elements.append({
-            "data": {"id": n, "label": _short_label(n), "title": G.nodes[n].get("label", n)},
+        display_label = G.nodes[n].get("label", n)
+        base_label = _abbreviate_city_in_label(display_label)
+        region = _get_region_from_graph(G, n)
+        has_rain = bool(rain_by_region and rain_by_region.get(region, 1.0) > 1.0)
+        if has_rain:
+            base_label += " 💧"
+        node_elem: Dict[str, Any] = {
+            "data": {"id": n, "label": base_label, "title": display_label},
             "position": {"x": x, "y": -y},
-        })
+        }
+        classes = []
+        if n == start_node:
+            classes.append("start")
+        if n == goal_node:
+            classes.append("goal")
+        if classes:
+            node_elem["classes"] = " ".join(classes)
+        elements.append(node_elem)
+    # Opcional: arestas com segunda cor (efeito listrado). Chave no grafo ou em G.edges[u,v]["stripe_color"]
+    striped_edges = G.graph.get("striped_edges", {})
     for u, v in G.edges():
         edge_id = f"{u}->{v}"
         cost = edge_costs[(u, v)]
         blocked = not math.isfinite(cost) and (cost == math.inf or cost == float("inf"))
         color = cost_to_color(cost)
         tooltip = edge_tooltips.get((u, v), "")
+        congested = congestion_by_edge.get((u, v), 1.0) > 1.0
+        stripe_color = G.edges[u, v].get("stripe_color") or striped_edges.get((u, v))
         data: Dict[str, Any] = {
             "id": edge_id,
             "source": u,
@@ -77,21 +178,45 @@ def _build_cytoscape_elements(
         }
         if blocked:
             data["blocked"] = True
+        if congested:
+            data["congested"] = True
+        if path_edges is not None:
+            data["in_path"] = (u, v) in path_edges
+            data["edge_opacity"] = 1.0 if (u, v) in path_edges else 0.2
+        else:
+            data["edge_opacity"] = 1.0
         elements.append({"data": data})
+        # Segunda cor (listrado): desenhar uma aresta tracejada por baixo com a cor alternativa
+        if stripe_color and not blocked:
+            stripe_id = f"{u}->{v}_stripe"
+            stripe_opacity = data.get("edge_opacity", 1.0)
+            elements.append({
+                "data": {
+                    "id": stripe_id,
+                    "source": u,
+                    "target": v,
+                    "color": stripe_color,
+                    "edge_opacity": stripe_opacity,
+                    "stripe_layer": True,
+                }
+            })
     return elements
 
 
 def display_graph(
     G: "nx.DiGraph",
     html_path: str = "grafo_ouro_preto.html",
-    min_distance: float = 400,
-    iterations: int = 8,
-    factor: float = 0.4,
+    min_distance: Optional[float] = 400,
+    iterations: int = 20,
+    factor: float = 0.7,
     height: str = "550px",
     width: str = "100%",
     iframe_width: int = 900,
     iframe_height: int = 780,
     display_in_notebook: bool = True,
+    path: Optional[List[str]] = None,
+    start: Optional[str] = None,
+    goal: Optional[str] = None,
 ) -> Any:
     """
     Gera um grafo interativo com Dash Cytoscape (posições fixas, cores por custo) e
@@ -100,12 +225,27 @@ def display_graph(
     O parâmetro html_path é mantido por compatibilidade; com Cytoscape o grafo
     é exibido via app Dash (não gera arquivo HTML).
 
+    path: lista de nós do caminho percorrido (ex.: retorno de dijkstra). Se passado,
+    arestas fora do caminho ficam com opacidade 60% e arestas do caminho com 100%,
+    sem remover nenhuma informação do grafo.
+
+    start: id do nó de partida (exibido em verde). goal: id do nó de destino (exibido em vermelho).
+
+    min_distance: distância mínima centro a centro entre nós (px). Se None, usa 2 * NODE_SPAWN_RADIUS_PX (60px),
+    garantindo raio de 30px ao redor de cada nó no spawn.
+
     Retorna o app Dash (para reutilização ou run manual).
     """
     from src.graph import get_weight_function
 
     pos = {n: G.nodes[n]["pos"] for n in G.nodes()}
-    pos = spread_positions(pos, min_distance=min_distance, iterations=iterations, factor=factor)
+    pos = _scale_positions_to_canvas(pos)
+    pos = spread_positions(
+        pos,
+        min_distance=min_distance if min_distance is not None else 2.0 * NODE_SPAWN_RADIUS_PX,
+        iterations=iterations,
+        factor=factor,
+    )
 
     wf = get_weight_function(G)
     edge_costs = {(u, v): wf(u, v, G.edges[u, v]) for (u, v) in G.edges()}
@@ -147,9 +287,25 @@ def display_graph(
         return f"#{r:02x}{g:02x}00"
 
     edge_tooltips_dict = {(u, v): edge_tooltip(u, v) for u, v in G.edges()}
-    elements = _build_cytoscape_elements(G, pos, edge_costs, edge_tooltips_dict, cost_to_color)
+    path_edges: Optional[Set[Tuple[str, str]]] = None
+    if path and len(path) >= 2:
+        path_edges = set((path[i], path[i + 1]) for i in range(len(path) - 1))
+    elements = _build_cytoscape_elements(
+        G, pos, edge_costs, edge_tooltips_dict, cost_to_color,
+        path_edges=path_edges, start_node=start, goal_node=goal,
+    )
 
-    stylesheet = [
+    edge_base_style: Dict[str, Any] = {
+        "line-color": "data(color)",
+        "width": 2,
+        "curve-style": "bezier",
+        "target-arrow-color": "data(color)",
+        "target-arrow-shape": "triangle",
+        "arrow-scale": 1,
+        "opacity": "data(edge_opacity)",
+    }
+
+    stylesheet: List[Dict[str, Any]] = [
         {
             "selector": "node",
             "style": {
@@ -157,20 +313,26 @@ def display_graph(
                 "background-color": "#87CEEB",
                 "color": "#ffffff",
                 "font-size": "12px",
-                "text-valign": "center",
+                "text-valign": "bottom",
                 "text-halign": "center",
+                "text-margin-y": 10,
             },
         },
+    ]
+    if start is not None:
+        stylesheet.append({
+            "selector": "#" + _escape_cytoscape_id(start),
+            "style": {"background-color": "#22c55e", "color": "#ffffff"},
+        })
+    if goal is not None:
+        stylesheet.append({
+            "selector": "#" + _escape_cytoscape_id(goal),
+            "style": {"background-color": "#ef4444", "color": "#ffffff"},
+        })
+    stylesheet.extend([
         {
             "selector": "edge",
-            "style": {
-                "line-color": "data(color)",
-                "width": 2,
-                "curve-style": "bezier",
-                "target-arrow-color": "data(color)",
-                "target-arrow-shape": "triangle",
-                "arrow-scale": 1,
-            },
+            "style": edge_base_style,
         },
         {
             "selector": "edge[blocked]",
@@ -189,7 +351,33 @@ def display_graph(
                 "line-style": "dashed",
             },
         },
-    ]
+        {
+            "selector": "edge[congested]",
+            "style": {
+                "label": "🚗",
+                "color": "#f1c40f",
+                "font-size": "22px",
+                "text-margin-y": -10,
+                "text-background-opacity": 0,
+                "text-background-color": "transparent",
+                "text-background-padding": "2px",
+                "z-index": 10,
+            },
+        },
+        # Aresta “listrada”: segunda camada tracejada (cor em data(color)), atrás da linha principal
+        {
+            "selector": "edge[stripe_layer]",
+            "style": {
+                "line-color": "data(color)",
+                "target-arrow-color": "data(color)",
+                "target-arrow-shape": "none",
+                "width": 3,
+                "line-style": "dashed",
+                "opacity": "data(edge_opacity)",
+                "z-index": -1,
+            },
+        },
+    ])
 
     default_layout = {"name": "preset", "fit": True, "padding": 30}
     reset_layout = {"name": "preset", "fit": True, "animate": True, "animationDuration": 300, "padding": 30}

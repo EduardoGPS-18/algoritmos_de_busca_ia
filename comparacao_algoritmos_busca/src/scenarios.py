@@ -14,6 +14,7 @@ import networkx as nx
 
 from .graph import (
     KEY_CONGESTION_FACTOR,
+    KEY_CONGESTION_FACTOR_BY_EDGE,
     KEY_CONGESTION_FACTOR_BY_REGION,
     KEY_EDGE_COST_MULTIPLIER,
     KEY_EDGE_OVERRIDE,
@@ -37,6 +38,82 @@ BARRIERS_EXTRA_OURO_PRETO = [
     ("praca_tiradentes", "rua_pilar"),
     ("rua_pilar", "praca_tiradentes"),
 ]
+
+# Congestionamento por via (grafo Ouro Preto): vias centro ↔ são_jose
+CONGESTED_EDGES_OURO_PRETO = [
+    ("centro", "sao_jose"),
+    ("sao_jose", "centro"),
+]
+
+# Congestionamento por via (grafo regional): vias em OP (op_tiradentes ↔ op_centro, op_centro ↔ op_antonio_dias)
+CONGESTED_EDGES_REGIONAL_OP = [
+    ("op_tiradentes", "op_centro"),
+    ("op_centro", "op_tiradentes"),
+    ("op_centro", "op_antonio_dias"),
+    ("op_antonio_dias", "op_centro"),
+]
+
+# --- Casos de teste Ouro Preto (START=rio_piracicaba, GOAL=americo_rene_gianetti) ---
+# Caminho baseline típico: rio_piracicaba → joao_de_paiva → hugo_soderi → americo_rene_gianetti.
+# Impeditivos em arestas desse caminho para forçar desvio ou custo maior.
+
+# Caso 1: Interditar rio_piracicaba ↔ joao_de_paiva (primeira aresta do caminho)
+OURO_PRETO_BLOCKED_CASE1 = [
+    ("rio_piracicaba", "joao_de_paiva"),
+    ("joao_de_paiva", "rio_piracicaba"),
+]
+
+# Caso 2: Congestionamento em joao_de_paiva ↔ hugo_soderi e hugo_soderi ↔ americo_rene_gianetti
+OURO_PRETO_CONGESTED_CASE2 = {
+    ("joao_de_paiva", "hugo_soderi"): 2.5,
+    ("hugo_soderi", "joao_de_paiva"): 2.5,
+    ("hugo_soderi", "americo_rene_gianetti"): 2.0,
+    ("americo_rene_gianetti", "hugo_soderi"): 2.0,
+}
+
+# Caso 3: Chuva em “regiões” (nós) do caminho — joao_de_paiva, hugo_soderi
+OURO_PRETO_RAIN_REGIONS_CASE3 = {
+    "joao_de_paiva": 2.0,
+    "hugo_soderi": 2.0,
+    "americo_rene_gianetti": 1.8,
+}
+
+# Caso 4: Interditar rio_piracicaba ↔ joao_de_paiva + congestionamento em hugo_soderi ↔ americo_rene_gianetti
+OURO_PRETO_BLOCKED_CASE4 = [
+    ("rio_piracicaba", "joao_de_paiva"),
+    ("joao_de_paiva", "rio_piracicaba"),
+]
+OURO_PRETO_CONGESTED_CASE4 = {
+    ("hugo_soderi", "americo_rene_gianetti"): 3.0,
+    ("americo_rene_gianetti", "hugo_soderi"): 3.0,
+}
+
+# Caso 5: Interditar joao_de_paiva ↔ hugo_soderi (trecho central do caminho)
+OURO_PRETO_BLOCKED_CASE5 = [
+    ("joao_de_paiva", "hugo_soderi"),
+    ("hugo_soderi", "joao_de_paiva"),
+]
+
+# Caso 6: Congestionamento em todas as arestas do caminho baseline
+OURO_PRETO_CONGESTED_CASE6 = {
+    ("rio_piracicaba", "joao_de_paiva"): 2.0,
+    ("joao_de_paiva", "rio_piracicaba"): 2.0,
+    ("joao_de_paiva", "hugo_soderi"): 2.5,
+    ("hugo_soderi", "joao_de_paiva"): 2.5,
+    ("hugo_soderi", "americo_rene_gianetti"): 2.0,
+    ("americo_rene_gianetti", "hugo_soderi"): 2.0,
+}
+
+# Caso 7: Interditar hugo_soderi ↔ americo_rene_gianetti + chuva em regiões do caminho
+OURO_PRETO_BLOCKED_CASE7 = [
+    ("hugo_soderi", "americo_rene_gianetti"),
+    ("americo_rene_gianetti", "hugo_soderi"),
+]
+OURO_PRETO_RAIN_REGIONS_CASE7 = {
+    "joao_de_paiva": 2.5,
+    "hugo_soderi": 2.5,
+    "rio_piracicaba": 2.0,
+}
 
 # Barreiras adicionais — grafo regional (OP + Mariana + Cachoeira)
 BARRIERS_EXTRA_REGIONAL = [
@@ -144,18 +221,30 @@ def apply_congestion_scenario_by_region(
     region_factors: dict,
 ) -> None:
     """
-    Cenário de congestionamento por região: alguns trechos sobrecarregados, outros não.
-    region_factors: dict região -> fator (ex: {"op": 2.0, "mariana": 1.0};
-      ou por bairro: {"centro": 2.0, "sao_jose": 2.0}).
-    No grafo regional: "op", "mariana", "cachoeira". No grafo Ouro Preto: id do nó.
+    Cenário de congestionamento por região (legado): afeta todas as arestas que saem de nós da região.
+    Prefira apply_congestion_scenario_by_edge para impactar apenas vias específicas.
+    region_factors: dict região -> fator (ex: {"op": 2.0, "mariana": 1.0}).
     """
     G.graph.setdefault(KEY_CONGESTION_FACTOR_BY_REGION, {}).update(region_factors)
 
 
+def apply_congestion_scenario_by_edge(
+    G: nx.DiGraph,
+    edge_factors: dict,
+) -> None:
+    """
+    Cenário de congestionamento por via (aresta): impacta apenas as vias indicadas.
+    edge_factors: dict (origem, destino) -> fator (ex: {("centro", "sao_jose"): 2.0}).
+    Congestionamento local afeta uma via somente, não um nó inteiro.
+    """
+    G.graph.setdefault(KEY_CONGESTION_FACTOR_BY_EDGE, {}).update(edge_factors)
+
+
 def clear_congestion_scenario(G: nx.DiGraph) -> None:
-    """Volta fator de congestionamento ao normal (global e por região)."""
+    """Volta fator de congestionamento ao normal (global, por região e por aresta)."""
     G.graph[KEY_CONGESTION_FACTOR] = 1.0
     G.graph[KEY_CONGESTION_FACTOR_BY_REGION] = {}
+    G.graph[KEY_CONGESTION_FACTOR_BY_EDGE] = {}
 
 
 def reset_scenarios(G: nx.DiGraph) -> None:
@@ -167,3 +256,4 @@ def reset_scenarios(G: nx.DiGraph) -> None:
     G.graph[KEY_SLOPE_PENALTY_FACTOR] = 1.0
     G.graph[KEY_CONGESTION_FACTOR] = 1.0
     G.graph[KEY_CONGESTION_FACTOR_BY_REGION] = {}
+    G.graph[KEY_CONGESTION_FACTOR_BY_EDGE] = {}

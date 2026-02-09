@@ -11,7 +11,7 @@ from typing import Callable, List, Optional, Tuple
 
 import networkx as nx
 
-from ..graph import get_edge_cost, get_straight_line_distance, path_cost
+from ..graph import get_edge_cost, get_straight_line_distance, path_cost, validate_path_nodes
 
 
 def a_star(
@@ -24,6 +24,7 @@ def a_star(
     Retorna (caminho do start ao goal, custo total) ou ([], inf) se não houver caminho.
     Heurística padrão: distância em linha reta entre o nó e o objetivo (admissível).
     """
+    validate_path_nodes(G, start, goal)
     if heuristic is None:
         def default_heuristic(n: str, target: str) -> float:
             return get_straight_line_distance(G, n, target)

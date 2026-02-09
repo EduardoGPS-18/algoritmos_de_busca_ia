@@ -11,7 +11,7 @@ from typing import Dict, List, Optional, Tuple
 
 import networkx as nx
 
-from ..graph import get_edge_cost, get_straight_line_distance
+from ..graph import get_edge_cost, get_straight_line_distance, validate_path_nodes
 
 
 def d_star_lite(
@@ -23,6 +23,7 @@ def d_star_lite(
     Retorna (caminho do start ao goal, custo total).
     Busca reversa (do goal ao start) sobre G; usa predecessores e custo (v, u).
     """
+    validate_path_nodes(G, start, goal)
     def h(u: str) -> float:
         return get_straight_line_distance(G, u, start)
 
