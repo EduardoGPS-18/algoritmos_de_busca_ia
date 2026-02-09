@@ -53,66 +53,72 @@ CONGESTED_EDGES_REGIONAL_OP = [
     ("op_antonio_dias", "op_centro"),
 ]
 
-# --- Casos de teste Ouro Preto (START=rio_piracicaba, GOAL=americo_rene_gianetti) ---
-# Caminho baseline típico: rio_piracicaba → joao_de_paiva → hugo_soderi → americo_rene_gianetti.
+# --- Casos de teste Ouro Preto (grafo_op_osm: START=rua_rio_piracicaba, GOAL=avenida_américo_rené_gianetti) ---
+# Nós conforme cache grafo_op_osm.gpickle (slugs OSM).
+# Caminho baseline: rua_rio_piracicaba → ladeira_joão_de_paiva → rua_hugo_soderi → avenida_américo_rené_gianetti.
 # Impeditivos em arestas desse caminho para forçar desvio ou custo maior.
 
-# Caso 1: Interditar rio_piracicaba ↔ joao_de_paiva (primeira aresta do caminho)
+# Caso 1: Interditar primeira aresta do caminho (rua_rio_piracicaba → rua_rio_verde no grafo_op_osm)
 OURO_PRETO_BLOCKED_CASE1 = [
-    ("rio_piracicaba", "joao_de_paiva"),
-    ("joao_de_paiva", "rio_piracicaba"),
+    ("rua_rio_negro", "ladeira_joão_de_paiva"),
+    ("rua_rio_negro", "way_1428886859"),
+    ("rua_rio_piracicaba", "way_385991379"),
+    ("rua_rio_piracicaba", "rua_rio_verde"),
+    ("rua_rio_piracicaba", "way_385994085"),
+    ("rua_rio_piracicaba", "way_385994083"),
+    
 ]
 
 # Caso 2: Congestionamento em joao_de_paiva ↔ hugo_soderi e hugo_soderi ↔ americo_rene_gianetti
 OURO_PRETO_CONGESTED_CASE2 = {
-    ("joao_de_paiva", "hugo_soderi"): 2.5,
-    ("hugo_soderi", "joao_de_paiva"): 2.5,
-    ("hugo_soderi", "americo_rene_gianetti"): 2.0,
-    ("americo_rene_gianetti", "hugo_soderi"): 2.0,
+    ("ladeira_joão_de_paiva", "rua_hugo_soderi"): 2.5,
+    ("rua_hugo_soderi", "ladeira_joão_de_paiva"): 2.5,
+    ("rua_hugo_soderi", "avenida_américo_rené_gianetti"): 2.0,
+    ("avenida_américo_rené_gianetti", "rua_hugo_soderi"): 2.0,
 }
 
 # Caso 3: Chuva em “regiões” (nós) do caminho — joao_de_paiva, hugo_soderi
 OURO_PRETO_RAIN_REGIONS_CASE3 = {
-    "joao_de_paiva": 2.0,
-    "hugo_soderi": 2.0,
-    "americo_rene_gianetti": 1.8,
+    "ladeira_joão_de_paiva": 2.0,
+    "rua_hugo_soderi": 2.0,
+    "avenida_américo_rené_gianetti": 1.8,
 }
 
 # Caso 4: Interditar rio_piracicaba ↔ joao_de_paiva + congestionamento em hugo_soderi ↔ americo_rene_gianetti
 OURO_PRETO_BLOCKED_CASE4 = [
-    ("rio_piracicaba", "joao_de_paiva"),
-    ("joao_de_paiva", "rio_piracicaba"),
+    ("rua_rio_piracicaba", "ladeira_joão_de_paiva"),
+    ("ladeira_joão_de_paiva", "rua_rio_piracicaba"),
 ]
 OURO_PRETO_CONGESTED_CASE4 = {
-    ("hugo_soderi", "americo_rene_gianetti"): 3.0,
-    ("americo_rene_gianetti", "hugo_soderi"): 3.0,
+    ("rua_hugo_soderi", "avenida_américo_rené_gianetti"): 3.0,
+    ("avenida_américo_rené_gianetti", "rua_hugo_soderi"): 3.0,
 }
 
 # Caso 5: Interditar joao_de_paiva ↔ hugo_soderi (trecho central do caminho)
 OURO_PRETO_BLOCKED_CASE5 = [
-    ("joao_de_paiva", "hugo_soderi"),
-    ("hugo_soderi", "joao_de_paiva"),
+    ("ladeira_joão_de_paiva", "rua_hugo_soderi"),
+    ("rua_hugo_soderi", "ladeira_joão_de_paiva"),
 ]
 
 # Caso 6: Congestionamento em todas as arestas do caminho baseline
 OURO_PRETO_CONGESTED_CASE6 = {
-    ("rio_piracicaba", "joao_de_paiva"): 2.0,
-    ("joao_de_paiva", "rio_piracicaba"): 2.0,
-    ("joao_de_paiva", "hugo_soderi"): 2.5,
-    ("hugo_soderi", "joao_de_paiva"): 2.5,
-    ("hugo_soderi", "americo_rene_gianetti"): 2.0,
-    ("americo_rene_gianetti", "hugo_soderi"): 2.0,
+    ("rua_rio_piracicaba", "ladeira_joão_de_paiva"): 2.0,
+    ("ladeira_joão_de_paiva", "rua_rio_piracicaba"): 2.0,
+    ("ladeira_joão_de_paiva", "rua_hugo_soderi"): 2.5,
+    ("rua_hugo_soderi", "ladeira_joão_de_paiva"): 2.5,
+    ("rua_hugo_soderi", "avenida_américo_rené_gianetti"): 2.0,
+    ("avenida_américo_rené_gianetti", "rua_hugo_soderi"): 2.0,
 }
 
 # Caso 7: Interditar hugo_soderi ↔ americo_rene_gianetti + chuva em regiões do caminho
 OURO_PRETO_BLOCKED_CASE7 = [
-    ("hugo_soderi", "americo_rene_gianetti"),
-    ("americo_rene_gianetti", "hugo_soderi"),
+    ("rua_hugo_soderi", "avenida_américo_rené_gianetti"),
+    ("avenida_américo_rené_gianetti", "rua_hugo_soderi"),
 ]
 OURO_PRETO_RAIN_REGIONS_CASE7 = {
-    "joao_de_paiva": 2.5,
-    "hugo_soderi": 2.5,
-    "rio_piracicaba": 2.0,
+    "ladeira_joão_de_paiva": 2.5,
+    "rua_hugo_soderi": 2.5,
+    "rua_rio_piracicaba": 2.0,
 }
 
 # Barreiras adicionais — grafo regional (OP + Mariana + Cachoeira)

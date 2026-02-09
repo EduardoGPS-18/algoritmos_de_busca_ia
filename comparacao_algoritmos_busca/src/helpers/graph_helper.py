@@ -8,7 +8,7 @@ import math
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
 
 import dash_cytoscape as cyto
-from dash import Dash, Input, Output, html
+from dash import Dash, Input, Output, State, callback_context, html, dcc, no_update
 
 if TYPE_CHECKING:
     import networkx as nx
@@ -126,7 +126,7 @@ def _build_cytoscape_elements(
     Nós em regiões com chuva local (rain_multiplier_by_region > 1) ganham ícone 💧.
     Arestas congestionadas (congestion_factor_by_edge > 1) ganham ícone 🚗 na via (desenhada à frente).
     Se path_edges for passado, arestas do caminho recebem in_path=True (opacidade 100%); demais in_path=False (60%).
-    start_node e goal_node recebem classes para destaque (verde e vermelho).
+    start_node e goal_node recebem classes para destaque (verde escuro e vermelho).
     Arestas com segunda cor (efeito listrado): use G.edges[u,v]['stripe_color'] = '#hex' ou
     G.graph['striped_edges'] = {(u,v): '#hex', ...}; a linha principal fica sólida e uma camada tracejada
     com a segunda cor é desenhada por baixo.
@@ -208,7 +208,7 @@ def _build_cytoscape_elements(
 def display_graph(
     G: "nx.DiGraph",
     html_path: str = "grafo_ouro_preto.html",
-    min_distance: Optional[float] = 400,
+    min_distance: Optional[float] = 100,
     iterations: int = 20,
     factor: float = 0.7,
     height: str = "550px",
@@ -231,7 +231,7 @@ def display_graph(
     arestas fora do caminho ficam com opacidade 60% e arestas do caminho com 100%,
     sem remover nenhuma informação do grafo.
 
-    start: id do nó de partida (exibido em verde). goal: id do nó de destino (exibido em vermelho).
+    start: id do nó de partida/saída (verde escuro #14532d). goal: id do nó de destino (vermelho).
 
     min_distance: distância mínima centro a centro entre nós (px). Se None, usa 2 * NODE_SPAWN_RADIUS_PX (60px),
     garantindo raio de 30px ao redor de cada nó no spawn.
@@ -299,7 +299,7 @@ def display_graph(
 
     edge_base_style: Dict[str, Any] = {
         "line-color": "data(color)",
-        "width": 2,
+        "width": 1,
         "curve-style": "bezier",
         "target-arrow-color": "data(color)",
         "target-arrow-shape": "triangle",
@@ -323,20 +323,34 @@ def display_graph(
             },
         },
     ]
+    # Nó de origem (saída): verde escuro #14532d; nó de destino: vermelho (por classe e por id para garantir)
     if start is not None:
         stylesheet.append({
             "selector": "#" + _escape_cytoscape_id(start),
-            "style": {"background-color": "#22c55e", "color": "#ffffff"},
+            "style": {"background-color": "#14532d", "color": "#ffffff"},
+        })
+        stylesheet.append({
+            "selector": "node.start",
+            "style": {"background-color": "#14532d", "color": "#ffffff"},
         })
     if goal is not None:
         stylesheet.append({
             "selector": "#" + _escape_cytoscape_id(goal),
             "style": {"background-color": "#ef4444", "color": "#ffffff"},
         })
+        stylesheet.append({
+            "selector": "node.goal",
+            "style": {"background-color": "#ef4444", "color": "#ffffff"},
+        })
     stylesheet.extend([
         {
             "selector": "edge",
             "style": edge_base_style,
+        },
+        # Arestas do caminho real (path): mais espessas que as demais (base = 2)
+        {
+            "selector": "edge[in_path]",
+            "style": {"width": 6},
         },
         {
             "selector": "edge[blocked]",
@@ -385,20 +399,42 @@ def display_graph(
 
     default_layout = {"name": "preset", "fit": True, "padding": 30}
     reset_layout = {"name": "preset", "fit": True, "animate": True, "animationDuration": 300, "padding": 30}
+    # Layout sem fit, só para forçar sincronização ao centralizar (evita bug após usuário mover câmera)
+    _layout_no_fit = {"name": "preset", "fit": False, "animate": False, "padding": 0}
+
+    _cytoscape_style = {
+        "width": width,
+        "height": height,
+        "backgroundColor": "#404040",
+        "overflow": "hidden",
+    }
+
+    def _make_cytoscape(
+        layout_dict: Dict[str, Any],
+        pan: Optional[Dict[str, float]] = None,
+        zoom: Optional[float] = None,
+        key: Optional[str] = None,
+    ):
+        props = dict(
+            id="cytoscape-graph",
+            elements=elements,
+            layout=layout_dict,
+            style=_cytoscape_style,
+            stylesheet=stylesheet,
+        )
+        if pan is not None:
+            props["pan"] = pan
+        if zoom is not None:
+            props["zoom"] = zoom
+        if key is not None:
+            props["key"] = key
+        return cyto.Cytoscape(**props)
 
     app = Dash(__name__)
     app.layout = html.Div([
-        cyto.Cytoscape(
-            id="cytoscape-graph",
-            elements=elements,
-            layout=default_layout,
-            style={
-                "width": width,
-                "height": height,
-                "backgroundColor": "#404040",
-                "overflow": "hidden",
-            },
-            stylesheet=stylesheet,
+        html.Div(
+            id="cytoscape-wrapper",
+            children=[_make_cytoscape(default_layout)],
         ),
         html.Button(
             "Resetar vista (R ou Espaço)",
@@ -414,6 +450,54 @@ def display_graph(
                 "color": "#fff",
                 "border": "1px solid #666",
                 "borderRadius": "4px",
+            },
+        ),
+        html.Button(
+            "Centralizar na origem",
+            id="center-start-btn",
+            title="Centraliza a vista no nó de partida (start)",
+            style={
+                "marginTop": "8px",
+                "marginLeft": "8px",
+                "padding": "6px 12px",
+                "fontSize": "12px",
+                "cursor": "pointer",
+                "backgroundColor": "#555",
+                "color": "#fff",
+                "border": "1px solid #666",
+                "borderRadius": "4px",
+            },
+        ),
+        html.Button(
+            "Centralizar no destino",
+            id="center-goal-btn",
+            title="Centraliza a vista no nó de destino (goal)",
+            style={
+                "marginTop": "8px",
+                "marginLeft": "8px",
+                "padding": "6px 12px",
+                "fontSize": "12px",
+                "cursor": "pointer",
+                "backgroundColor": "#555",
+                "color": "#fff",
+                "border": "1px solid #666",
+                "borderRadius": "4px",
+            },
+        ),
+        dcc.Store(
+            id="cytoscape-view-state",
+            data={
+                "start": start,
+                "goal": goal,
+                "start_pos": list(pos[start]) if start and start in pos else None,
+                "goal_pos": list(pos[goal]) if goal and goal in pos else None,
+                "center_x": _LAYOUT_CANVAS_WIDTH / 2,
+                "center_y": _LAYOUT_CANVAS_HEIGHT / 2,
+                "zoom_center": 1.5,
+                "view_key": 0,
+                "pan": None,
+                "zoom": None,
+                "layout_trigger": None,
             },
         ),
         html.Div(
@@ -491,6 +575,62 @@ def display_graph(
         if not n_clicks:
             return default_layout
         return {**reset_layout, "trigger": n_clicks}
+
+    @app.callback(
+        [Output("cytoscape-view-state", "data"), Output("cytoscape-wrapper", "children")],
+        [Input("center-start-btn", "n_clicks"), Input("center-goal-btn", "n_clicks")],
+        State("cytoscape-view-state", "data"),
+        prevent_initial_call=True,
+    )
+    def center_on_node(start_clicks, goal_clicks, data):
+        if not data:
+            return no_update, no_update
+        ctx = callback_context
+        if not ctx.triggered:
+            return no_update, no_update
+        trigger_id = ctx.triggered[0]["prop_id"].split(".")[0]
+        n_clicks = ctx.triggered[0].get("value") or 0
+        zoom = data.get("zoom_center", 1.5)
+        cx = data.get("center_x", _LAYOUT_CANVAS_WIDTH / 2)
+        cy = data.get("center_y", _LAYOUT_CANVAS_HEIGHT / 2)
+        layout_sync = {**_layout_no_fit, "trigger": f"center_{trigger_id}_{n_clicks}"}
+        if trigger_id == "center-start-btn" and data.get("start_pos"):
+            nx, ny = data["start_pos"][0], data["start_pos"][1]
+            pan_x = cx - zoom * nx
+            pan_y = cy + zoom * ny
+            new_data = {
+                **data,
+                "pan": {"x": pan_x, "y": pan_y},
+                "zoom": zoom,
+                "view_key": data.get("view_key", 0) + 1,
+                "layout_trigger": layout_sync,
+            }
+            new_cy = _make_cytoscape(
+                layout_sync,
+                pan={"x": pan_x, "y": pan_y},
+                zoom=zoom,
+                key=str(new_data["view_key"]),
+            )
+            return new_data, [new_cy]
+        if trigger_id == "center-goal-btn" and data.get("goal_pos"):
+            nx, ny = data["goal_pos"][0], data["goal_pos"][1]
+            pan_x = cx - zoom * nx
+            pan_y = cy + zoom * ny
+            new_data = {
+                **data,
+                "pan": {"x": pan_x, "y": pan_y},
+                "zoom": zoom,
+                "view_key": data.get("view_key", 0) + 1,
+                "layout_trigger": layout_sync,
+            }
+            new_cy = _make_cytoscape(
+                layout_sync,
+                pan={"x": pan_x, "y": pan_y},
+                zoom=zoom,
+                key=str(new_data["view_key"]),
+            )
+            return new_data, [new_cy]
+        return no_update, no_update
 
     @app.callback(
         Output("cytoscape-hover-output", "children"),
