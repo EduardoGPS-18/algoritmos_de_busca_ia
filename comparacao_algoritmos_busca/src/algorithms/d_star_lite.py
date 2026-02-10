@@ -11,7 +11,7 @@ from typing import Dict, List, Optional, Tuple
 
 import networkx as nx
 
-from ..graph import get_edge_cost, get_straight_line_distance, validate_path_nodes
+from ..graph_operations import GraphOperations
 
 
 def d_star_lite(
@@ -23,9 +23,9 @@ def d_star_lite(
     Retorna (caminho do start ao goal, custo total).
     Busca reversa (do goal ao start) sobre G; usa predecessores e custo (v, u).
     """
-    validate_path_nodes(G, start, goal)
+    GraphOperations.validate_path_nodes(G, start, goal)
     def h(u: str) -> float:
-        return get_straight_line_distance(G, u, start)
+        return GraphOperations.get_straight_line_distance(G, u, start)
 
     g_score: Dict[str, float] = {goal: 0.0}
     f_score: Dict[str, float] = {goal: h(goal)}
@@ -44,7 +44,7 @@ def d_star_lite(
 
         # No grafo reverso: predecessores de u (aresta v -> u no original)
         for v in G.predecessors(u):
-            w = get_edge_cost(G, v, u)
+            w = GraphOperations.get_edge_cost(G, v, u)
             if w == float("inf"):
                 continue
             tentative_g = g_score[u] + w

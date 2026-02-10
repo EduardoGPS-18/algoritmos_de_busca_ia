@@ -14,27 +14,24 @@ Roteamento em Ouro Preto com função de custo (declividade, rugosidade, congest
 - **`experimentos.ipynb`** — Notebook Jupyter para rodar experimentos e gerar resultados para o relatório.
 - **`relatorio/`** — Relatório em LaTeX (template SBC, Overleaf).
 
-## Grafo a partir do Google Maps
+## Grafo a partir do OpenStreetMap (Overpass)
 
-O grafo é gerado via **Google Maps** (Geocoding + Directions):
+O grafo é gerado via **Overpass API** (OSM):
 
-- **`build_ouro_preto_example(api_key=None)`** — usa a lista padrão de pontos em Ouro Preto e chama a API.
-- **`build_graph_from_google_maps(places, api_key=None, ...)`** — gera o grafo para uma lista customizada de lugares (`places = [{"id": "...", "address": "..."}, ...]`).
+- **`BuildGraph().build_op_graph(levels=4, use_cache=True)`** — constrói o grafo das ruas de Ouro Preto (sede) a partir de ways conectadas, com cache em `cache/grafo_op_osm.gpickle`.
 
-**API key:** o projeto carrega automaticamente o `.env` da **raiz do projeto** (pasta que contém `comparacao_algoritmos_busca` ou a própria pasta do trabalho). Coloque `GOOGLE_MAPS_API_KEY=sua-chave` no `.env` ou defina a variável de ambiente / passe `api_key=...`. É necessário ativar **Geocoding API** e **Directions API** no Google Cloud.
+Não é necessária API key do Google para construir o grafo (apenas conversão de coordenadas usa helpers que podem vir do `GoogleApiClient`).
 
 ## Como rodar
 
 1. Instalar dependências: `pip install -r requirements.txt`
-2. Definir `GOOGLE_MAPS_API_KEY` (ou passar `api_key` ao chamar `build_ouro_preto_example(api_key="...")`).
-3. Abrir `experimentos.ipynb` e executar as células (kernel com cwd = pasta do projeto).
+2. Abrir `experimentos.ipynb` e executar as células (kernel com cwd = pasta do projeto).
 
 Ou no terminal:
 
 ```bash
 cd comparacao_algoritmos_busca
-export GOOGLE_MAPS_API_KEY="sua-chave"
-python3 -c "from src.graph import build_ouro_preto_example; from src.algorithms import dijkstra, a_star, d_star_lite; G = build_ouro_preto_example(); print(dijkstra(G, 'praca_tiradentes', 'campus'))"
+python3 -c "from src.build_graph import BuildGraph; from src.algorithms import dijkstra; G = BuildGraph().build_op_graph(use_cache=True); nodes = list(G.nodes()); print(dijkstra(G, nodes[0], nodes[-1]) if len(nodes) >= 2 else 'Grafo com poucos nós')"
 ```
 
 ## Relatório

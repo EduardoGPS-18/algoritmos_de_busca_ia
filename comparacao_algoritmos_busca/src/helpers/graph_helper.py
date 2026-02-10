@@ -8,7 +8,7 @@ import math
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
 
 import dash_cytoscape as cyto
-from dash import Dash, Input, Output, State, callback_context, html, dcc, no_update
+from dash import Dash, Input, Output, html, dcc
 
 if TYPE_CHECKING:
     import networkx as nx
@@ -131,10 +131,10 @@ def _build_cytoscape_elements(
     G.graph['striped_edges'] = {(u,v): '#hex', ...}; a linha principal fica sólida e uma camada tracejada
     com a segunda cor é desenhada por baixo.
     """
-    from src.graph import (
+    from src.graph_operations import (
         KEY_CONGESTION_FACTOR_BY_EDGE,
         KEY_RAIN_MULTIPLIER_BY_REGION,
-        _get_region_from_graph,
+        GraphOperations,
     )
     rain_by_region = G.graph.get(KEY_RAIN_MULTIPLIER_BY_REGION, {})
     congestion_by_edge = G.graph.get(KEY_CONGESTION_FACTOR_BY_EDGE, {})
@@ -145,7 +145,7 @@ def _build_cytoscape_elements(
         if not (display_label and str(display_label).strip()):
             display_label = n.replace("_", " ").replace("-", " ").title()
         base_label = _abbreviate_city_in_label(str(display_label).strip())
-        region = _get_region_from_graph(G, n)
+        region = GraphOperations.get_region_from_graph(G, n)
         has_rain = bool(rain_by_region and rain_by_region.get(region, 1.0) > 1.0)
         if has_rain:
             base_label += " 💧"
@@ -238,7 +238,7 @@ def display_graph(
 
     Retorna o app Dash (para reutilização ou run manual).
     """
-    from src.graph import get_weight_function
+    from src.graph_operations import GraphOperations
 
     pos = {n: G.nodes[n]["pos"] for n in G.nodes()}
     pos = _scale_positions_to_canvas(pos)
@@ -249,7 +249,7 @@ def display_graph(
         factor=factor,
     )
 
-    wf = get_weight_function(G)
+    wf = GraphOperations.get_weight_function(G)
     edge_costs = {(u, v): wf(u, v, G.edges[u, v]) for (u, v) in G.edges()}
     valid_costs = [c for c in edge_costs.values() if math.isfinite(c)]
     min_c = min(valid_costs) if valid_costs else 0.0
@@ -259,16 +259,12 @@ def display_graph(
         d = G.edges[u, v]
         dist = d.get("distance", 0)
         slope = d.get("slope_pct", 0)
-        rough = d.get("roughness", 1)
-        volcap = d.get("volume_capacity_ratio", 0)
         cost = edge_costs.get((u, v), 0)
         orig, dest = _short_label(u), _short_label(v)
         return "\n".join([
             f"Conecta: {orig} → {dest}",
             f"Distância (distance): {dist:.0f} m",
             f"Declividade (slope_pct): {slope:.1f} %",
-            f"Rugosidade (roughness): {rough:.2f}",
-            f"Volume/Capacidade (volume_capacity_ratio): {volcap:.2f}",
             f"Custo: {cost:.1f}",
         ])
 
@@ -399,42 +395,20 @@ def display_graph(
 
     default_layout = {"name": "preset", "fit": True, "padding": 30}
     reset_layout = {"name": "preset", "fit": True, "animate": True, "animationDuration": 300, "padding": 30}
-    # Layout sem fit, só para forçar sincronização ao centralizar (evita bug após usuário mover câmera)
-    _layout_no_fit = {"name": "preset", "fit": False, "animate": False, "padding": 0}
-
-    _cytoscape_style = {
-        "width": width,
-        "height": height,
-        "backgroundColor": "#404040",
-        "overflow": "hidden",
-    }
-
-    def _make_cytoscape(
-        layout_dict: Dict[str, Any],
-        pan: Optional[Dict[str, float]] = None,
-        zoom: Optional[float] = None,
-        key: Optional[str] = None,
-    ):
-        props = dict(
-            id="cytoscape-graph",
-            elements=elements,
-            layout=layout_dict,
-            style=_cytoscape_style,
-            stylesheet=stylesheet,
-        )
-        if pan is not None:
-            props["pan"] = pan
-        if zoom is not None:
-            props["zoom"] = zoom
-        if key is not None:
-            props["key"] = key
-        return cyto.Cytoscape(**props)
 
     app = Dash(__name__)
     app.layout = html.Div([
-        html.Div(
-            id="cytoscape-wrapper",
-            children=[_make_cytoscape(default_layout)],
+        cyto.Cytoscape(
+            id="cytoscape-graph",
+            elements=elements,
+            layout=default_layout,
+            style={
+                "width": width,
+                "height": height,
+                "backgroundColor": "#404040",
+                "overflow": "hidden",
+            },
+            stylesheet=stylesheet,
         ),
         html.Button(
             "Resetar vista (R ou Espaço)",
@@ -450,54 +424,6 @@ def display_graph(
                 "color": "#fff",
                 "border": "1px solid #666",
                 "borderRadius": "4px",
-            },
-        ),
-        html.Button(
-            "Centralizar na origem",
-            id="center-start-btn",
-            title="Centraliza a vista no nó de partida (start)",
-            style={
-                "marginTop": "8px",
-                "marginLeft": "8px",
-                "padding": "6px 12px",
-                "fontSize": "12px",
-                "cursor": "pointer",
-                "backgroundColor": "#555",
-                "color": "#fff",
-                "border": "1px solid #666",
-                "borderRadius": "4px",
-            },
-        ),
-        html.Button(
-            "Centralizar no destino",
-            id="center-goal-btn",
-            title="Centraliza a vista no nó de destino (goal)",
-            style={
-                "marginTop": "8px",
-                "marginLeft": "8px",
-                "padding": "6px 12px",
-                "fontSize": "12px",
-                "cursor": "pointer",
-                "backgroundColor": "#555",
-                "color": "#fff",
-                "border": "1px solid #666",
-                "borderRadius": "4px",
-            },
-        ),
-        dcc.Store(
-            id="cytoscape-view-state",
-            data={
-                "start": start,
-                "goal": goal,
-                "start_pos": list(pos[start]) if start and start in pos else None,
-                "goal_pos": list(pos[goal]) if goal and goal in pos else None,
-                "center_x": _LAYOUT_CANVAS_WIDTH / 2,
-                "center_y": _LAYOUT_CANVAS_HEIGHT / 2,
-                "zoom_center": 1.5,
-                "view_key": 0,
-                "pan": None,
-                "zoom": None,
-                "layout_trigger": None,
             },
         ),
         html.Div(
@@ -575,62 +501,6 @@ def display_graph(
         if not n_clicks:
             return default_layout
         return {**reset_layout, "trigger": n_clicks}
-
-    @app.callback(
-        [Output("cytoscape-view-state", "data"), Output("cytoscape-wrapper", "children")],
-        [Input("center-start-btn", "n_clicks"), Input("center-goal-btn", "n_clicks")],
-        State("cytoscape-view-state", "data"),
-        prevent_initial_call=True,
-    )
-    def center_on_node(start_clicks, goal_clicks, data):
-        if not data:
-            return no_update, no_update
-        ctx = callback_context
-        if not ctx.triggered:
-            return no_update, no_update
-        trigger_id = ctx.triggered[0]["prop_id"].split(".")[0]
-        n_clicks = ctx.triggered[0].get("value") or 0
-        zoom = data.get("zoom_center", 1.5)
-        cx = data.get("center_x", _LAYOUT_CANVAS_WIDTH / 2)
-        cy = data.get("center_y", _LAYOUT_CANVAS_HEIGHT / 2)
-        layout_sync = {**_layout_no_fit, "trigger": f"center_{trigger_id}_{n_clicks}"}
-        if trigger_id == "center-start-btn" and data.get("start_pos"):
-            nx, ny = data["start_pos"][0], data["start_pos"][1]
-            pan_x = cx - zoom * nx
-            pan_y = cy + zoom * ny
-            new_data = {
-                **data,
-                "pan": {"x": pan_x, "y": pan_y},
-                "zoom": zoom,
-                "view_key": data.get("view_key", 0) + 1,
-                "layout_trigger": layout_sync,
-            }
-            new_cy = _make_cytoscape(
-                layout_sync,
-                pan={"x": pan_x, "y": pan_y},
-                zoom=zoom,
-                key=str(new_data["view_key"]),
-            )
-            return new_data, [new_cy]
-        if trigger_id == "center-goal-btn" and data.get("goal_pos"):
-            nx, ny = data["goal_pos"][0], data["goal_pos"][1]
-            pan_x = cx - zoom * nx
-            pan_y = cy + zoom * ny
-            new_data = {
-                **data,
-                "pan": {"x": pan_x, "y": pan_y},
-                "zoom": zoom,
-                "view_key": data.get("view_key", 0) + 1,
-                "layout_trigger": layout_sync,
-            }
-            new_cy = _make_cytoscape(
-                layout_sync,
-                pan={"x": pan_x, "y": pan_y},
-                zoom=zoom,
-                key=str(new_data["view_key"]),
-            )
-            return new_data, [new_cy]
-        return no_update, no_update
 
     @app.callback(
         Output("cytoscape-hover-output", "children"),

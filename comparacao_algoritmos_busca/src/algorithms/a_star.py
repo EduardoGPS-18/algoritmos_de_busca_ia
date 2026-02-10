@@ -11,7 +11,7 @@ from typing import Callable, List, Optional, Tuple
 
 import networkx as nx
 
-from ..graph import get_edge_cost, get_straight_line_distance, path_cost, validate_path_nodes
+from ..graph_operations import GraphOperations
 
 
 def a_star(
@@ -24,10 +24,10 @@ def a_star(
     Retorna (caminho do start ao goal, custo total) ou ([], inf) se não houver caminho.
     Heurística padrão: distância em linha reta entre o nó e o objetivo (admissível).
     """
-    validate_path_nodes(G, start, goal)
+    GraphOperations.validate_path_nodes(G, start, goal)
     if heuristic is None:
         def default_heuristic(n: str, target: str) -> float:
-            return get_straight_line_distance(G, n, target)
+            return GraphOperations.get_straight_line_distance(G, n, target)
         heuristic = default_heuristic
 
     g_score: dict[str, float] = {start: 0.0}
@@ -48,14 +48,14 @@ def a_star(
                 path.append(cur)
                 cur = prev[cur]
             path.reverse()
-            return path, path_cost(G, path)
+            return path, GraphOperations.path_cost(G, path)
 
         closed.add(u)
 
         for v in G.successors(u):
             if v in closed:
                 continue
-            w = get_edge_cost(G, u, v)
+            w = GraphOperations.get_edge_cost(G, u, v)
             if w == float("inf"):
                 continue
             tentative_g = g_score[u] + w
