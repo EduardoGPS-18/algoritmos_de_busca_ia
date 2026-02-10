@@ -398,7 +398,8 @@ class BuildGraph:
                 if G.has_edge(v, u):
                     G.edges[v, u]["slope_pct"] = slope_vu
             visited.add(u)
-
+            if len(visited) % 100 == 0:
+                print(f"enriching graph with elevation: {len(visited)}/{len(node_ids)} nodes processed")
         if save_to_cache:
             self._save_op_graph_to_cache(G)
         return G
@@ -416,7 +417,7 @@ class BuildGraph:
         """Constrói grafo das ruas de Ouro Preto (sede) via OpenStreetMap (Overpass API)."""
         cached = self._try_load_cached_op_graph(use_cache, force_rebuild)
         if cached is not None:
-            return self.enrich_graph_with_elevation(cached, save_to_cache=True)
+            return cached
 
         seed_ways = self._find_seed_ways_ouro_preto()
         seen_way_ids, ways_by_id, node_to_way_ids = _init_ways_state_from_seeds(seed_ways)
@@ -440,6 +441,7 @@ class BuildGraph:
         G = self._build_way_graph_from_ways(
             ways_by_id, node_to_way_ids, ref_lat, ref_lng, default_slope_pct=default_slope_pct
         )
+        print(f"enriching graph with elevation")
         G = self.enrich_graph_with_elevation(G, save_to_cache=True)
         print(f"build_op_graph: {G.number_of_nodes()} ruas, {G.number_of_edges()} arestas (levels={levels})")
         if use_cache:
