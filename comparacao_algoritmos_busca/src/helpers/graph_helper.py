@@ -126,7 +126,7 @@ def _build_cytoscape_elements(
     Nós em regiões com chuva local (rain_multiplier_by_region > 1) ganham ícone 💧.
     Arestas congestionadas (congestion_factor_by_edge > 1) ganham ícone 🚗 na via (desenhada à frente).
     Se path_edges for passado, arestas do caminho recebem in_path=True (opacidade 100%); demais in_path=False (60%).
-    start_node e goal_node recebem classes para destaque (verde escuro e vermelho).
+    start_node e goal_node recebem classes para destaque (vermelho e laranja). Texto dos nós sempre branco.
     Arestas com segunda cor (efeito listrado): use G.edges[u,v]['stripe_color'] = '#hex' ou
     G.graph['striped_edges'] = {(u,v): '#hex', ...}; a linha principal fica sólida e uma camada tracejada
     com a segunda cor é desenhada por baixo.
@@ -149,8 +149,22 @@ def _build_cytoscape_elements(
         has_rain = bool(rain_by_region and rain_by_region.get(region, 1.0) > 1.0)
         if has_rain:
             base_label += " 💧"
-        node_elem: Dict[str, Any] = {
-            "data": {"id": n, "label": base_label, "title": display_label},
+        # Cores de fundo por nó (saída=vermelho; chegada=laranja; demais=azul claro). Texto sempre branco.
+        if n == start_node:
+            node_bg = "#CC0000"
+        elif n == goal_node:
+            node_bg = "#FF8C00"
+        else:
+            node_bg = "#87CEEB"
+        node_color = "#ffffff"
+        node_elem = {
+            "data": {
+                "id": n,
+                "label": base_label,
+                "title": display_label,
+                "node_bg": node_bg,
+                "node_color": node_color,
+            },
             "position": {"x": x, "y": -y},
         }
         classes = []
@@ -231,7 +245,7 @@ def display_graph(
     arestas fora do caminho ficam com opacidade 60% e arestas do caminho com 100%,
     sem remover nenhuma informação do grafo.
 
-    start: id do nó de partida/saída (verde escuro #14532d). goal: id do nó de destino (vermelho).
+    start: id do nó de partida/saída (vermelho). goal: id do nó de destino/chegada (laranja). Textos em branco.
 
     min_distance: distância mínima centro a centro entre nós (px). Se None, usa 2 * NODE_SPAWN_RADIUS_PX (60px),
     garantindo raio de 30px ao redor de cada nó no spawn.
@@ -303,13 +317,14 @@ def display_graph(
         "opacity": "data(edge_opacity)",
     }
 
-    stylesheet: List[Dict[str, Any]] = [
+    # Cores de fundo e de fonte vêm de data(node_bg) e data(node_color) definidos em _build_cytoscape_elements
+    stylesheet = [
         {
             "selector": "node",
             "style": {
                 "content": "data(label)",
-                "background-color": "#87CEEB",
-                "color": "#ffffff",
+                "background-color": "data(node_bg)",
+                "color": "data(node_color)",
                 "font-size": "12px",
                 "text-valign": "bottom",
                 "text-halign": "center",
@@ -319,25 +334,6 @@ def display_graph(
             },
         },
     ]
-    # Nó de origem (saída): verde escuro #14532d; nó de destino: vermelho (por classe e por id para garantir)
-    if start is not None:
-        stylesheet.append({
-            "selector": "#" + _escape_cytoscape_id(start),
-            "style": {"background-color": "#14532d", "color": "#ffffff"},
-        })
-        stylesheet.append({
-            "selector": "node.start",
-            "style": {"background-color": "#14532d", "color": "#ffffff"},
-        })
-    if goal is not None:
-        stylesheet.append({
-            "selector": "#" + _escape_cytoscape_id(goal),
-            "style": {"background-color": "#ef4444", "color": "#ffffff"},
-        })
-        stylesheet.append({
-            "selector": "node.goal",
-            "style": {"background-color": "#ef4444", "color": "#ffffff"},
-        })
     stylesheet.extend([
         {
             "selector": "edge",
