@@ -37,6 +37,8 @@ OURO_PRETO_BBOX = (
 )
 
 _OSM_BATCH_DELAY_SEC = 1.5
+_GOOGLE_ELEVATION_BATCH_SIZE = 512
+_GOOGLE_ELEVATION_DELAY_SEC = 0.2
 
 
 def _slug_from_name(name: str) -> str:
@@ -346,6 +348,62 @@ class BuildGraph:
         except Exception:
             pass
 
+    def enrich_graph_with_elevation(
+        self,
+        G: nx.DiGraph,
+        save_to_cache: bool = True,
+    ) -> nx.DiGraph:
+        """
+        Enriquece o grafo existente com declividade (slope_pct) por aresta usando Google Elevation API.
+        Para cada nó, processa arestas para vizinhos ainda não visitados; calcula declividade e atualiza
+        o grafo; no final persiste no mesmo cache (grafo_op_osm.gpickle) se save_to_cache=True.
+        """
+        client = GoogleApiClient()
+        client._ensure_key()
+
+        node_ids = list(G.nodes())
+        locations: List[Tuple[float, float]] = []
+        for nid in node_ids:
+            nd = G.nodes.get(nid, {})
+            lat, lng = nd.get("lat"), nd.get("lng")
+            if lat is not None and lng is not None:
+                locations.append((float(lat), float(lng)))
+            else:
+                locations.append((0.0, 0.0))
+
+        elev_by_node: Dict[str, Optional[float]] = {}
+        for i in range(0, len(locations), _GOOGLE_ELEVATION_BATCH_SIZE):
+            chunk = locations[i : i + _GOOGLE_ELEVATION_BATCH_SIZE]
+            if i > 0:
+                time.sleep(_GOOGLE_ELEVATION_DELAY_SEC)
+            elevations = client.get_elevations_batch(chunk)
+            for j, nid in enumerate(node_ids[i : i + len(chunk)]):
+                elev_by_node[nid] = elevations[j] if j < len(elevations) else None
+
+        visited: Set[str] = set()
+        for u in node_ids:
+            for v in G.successors(u):
+                if v in visited:
+                    continue
+                dist = G.edges.get((u, v), {}).get("distance")
+                if dist is None or dist <= 0:
+                    continue
+                eu, ev = elev_by_node.get(u), elev_by_node.get(v)
+                if eu is None or ev is None:
+                    continue
+                slope_uv = client.slope_pct_from_elevation(eu, ev, dist)
+                slope_vu = client.slope_pct_from_elevation(ev, eu, dist)
+                if G.has_edge(u, v):
+                    G.edges[u, v]["slope_pct"] = slope_uv
+                if G.has_edge(v, u):
+                    G.edges[v, u]["slope_pct"] = slope_vu
+            visited.add(u)
+
+        if save_to_cache:
+            self._save_op_graph_to_cache(G)
+        return G
+
+
     def build_op_graph(
         self,
         levels: int = 4,
@@ -358,7 +416,7 @@ class BuildGraph:
         """Constrói grafo das ruas de Ouro Preto (sede) via OpenStreetMap (Overpass API)."""
         cached = self._try_load_cached_op_graph(use_cache, force_rebuild)
         if cached is not None:
-            return cached
+            return self.enrich_graph_with_elevation(cached, save_to_cache=True)
 
         seed_ways = self._find_seed_ways_ouro_preto()
         seen_way_ids, ways_by_id, node_to_way_ids = _init_ways_state_from_seeds(seed_ways)
@@ -382,6 +440,7 @@ class BuildGraph:
         G = self._build_way_graph_from_ways(
             ways_by_id, node_to_way_ids, ref_lat, ref_lng, default_slope_pct=default_slope_pct
         )
+        G = self.enrich_graph_with_elevation(G, save_to_cache=True)
         print(f"build_op_graph: {G.number_of_nodes()} ruas, {G.number_of_edges()} arestas (levels={levels})")
         if use_cache:
             self._save_op_graph_to_cache(G)
