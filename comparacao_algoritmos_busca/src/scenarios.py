@@ -14,12 +14,13 @@ from .graph_operations import (
     KEY_EDGE_COST_MULTIPLIER,
     KEY_EDGE_OVERRIDE,
     KEY_RAIN_MULTIPLIER,
-    KEY_RAIN_MULTIPLIER_BY_REGION,
     KEY_SLOPE_PENALTY_FACTOR,
 )
-from .test_cases import TestCases
+from .test_cases import START, GOAL, TestCases
 
 __all__ = [
+    "START",
+    "GOAL",
     "TestCases",
     "KEY_CONGESTION_FACTOR",
     "KEY_CONGESTION_FACTOR_BY_EDGE",
@@ -27,6 +28,5 @@ __all__ = [
     "KEY_EDGE_COST_MULTIPLIER",
     "KEY_EDGE_OVERRIDE",
     "KEY_RAIN_MULTIPLIER",
-    "KEY_RAIN_MULTIPLIER_BY_REGION",
     "KEY_SLOPE_PENALTY_FACTOR",
 ]

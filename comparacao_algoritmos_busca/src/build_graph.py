@@ -20,7 +20,6 @@ from .graph_operations import (
     KEY_EDGE_OVERRIDE,
     KEY_EDGE_COST_MULTIPLIER,
     KEY_RAIN_MULTIPLIER,
-    KEY_RAIN_MULTIPLIER_BY_REGION,
     KEY_SLOPE_PENALTY_FACTOR,
 )
 
@@ -63,7 +62,6 @@ def _default_graph_metadata() -> Dict[str, Any]:
     """Metadados padrão do grafo (chaves globais do NetworkX DiGraph)."""
     return {
         KEY_RAIN_MULTIPLIER: 1.0,
-        KEY_RAIN_MULTIPLIER_BY_REGION: {},
         KEY_SLOPE_PENALTY_FACTOR: 2.0,  # mais peso à declividade (1.0 = neutro)
         KEY_CONGESTION_FACTOR: 1.0,
         KEY_CONGESTION_FACTOR_BY_REGION: {},

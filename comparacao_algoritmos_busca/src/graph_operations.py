@@ -9,9 +9,8 @@ from typing import Any, Callable, Dict
 
 import networkx as nx
 
-# Chaves em G.graph para parâmetros do cenário
+# Chaves em G.graph para parâmetros do cenário (chuva = toda a área)
 KEY_RAIN_MULTIPLIER = "rain_multiplier"
-KEY_RAIN_MULTIPLIER_BY_REGION = "rain_multiplier_by_region"
 KEY_SLOPE_PENALTY_FACTOR = "slope_penalty_factor"
 KEY_CONGESTION_FACTOR = "congestion_factor"
 KEY_CONGESTION_FACTOR_BY_REGION = "congestion_factor_by_region"
@@ -51,16 +50,17 @@ class GraphOperations:
         """
         dist = d.get("distance", 0.0)
         slope_pct = d.get("slope_pct", 0.0)
-        # Peso da declividade: acima de 15% penaliza mais (ruas íngremes)
-        if slope_pct > 15:
-            slope_penalty = (slope_pct - 15) / 100 * slope_penalty_factor * rain_multiplier * 1.5
-            slope_penalty += (15 / 100) * slope_penalty_factor * rain_multiplier
-        elif slope_pct > 0:
-            slope_penalty = (slope_pct / 100) * slope_penalty_factor * rain_multiplier
+
+        # Penalidade por declividade: íngreme custa muito mais que longo (esforço sobe não-linearmente).
+        # Termo linear (base) + termo quadrático (penaliza forte ladeiras; carro às vezes nem sobe).
+        if slope_pct > 0:
+            s = slope_pct / 100.0
+            slope_penalty = s * slope_penalty_factor * rain_multiplier
+            slope_penalty += (s * s) * slope_penalty_factor * 10.0 * rain_multiplier  # quadrático: íngreme >> longo
         else:
             slope_penalty = 0.0
 
-        cost = dist * (1 + slope_penalty)
+        cost = dist * (1.0 + slope_penalty)
         return max(cost, 1e-6)
 
     @staticmethod
@@ -72,20 +72,17 @@ class GraphOperations:
     def get_weight_function(G: nx.DiGraph) -> Callable[[Any, Any, Dict], float]:
         """
         Retorna uma função (u, v, d) -> peso para uso em nx.dijkstra_path, nx.astar_path, etc.
-        Usa G.graph para rain_multiplier, edge_override, etc.
+        Chuva (KEY_RAIN_MULTIPLIER) aplica-se a toda a área.
         """
         override = G.graph.get(KEY_EDGE_OVERRIDE, {})
         edge_multiplier = G.graph.get(KEY_EDGE_COST_MULTIPLIER, {})
-        rain_global = G.graph.get(KEY_RAIN_MULTIPLIER, 1.0)
-        rain_by_region = G.graph.get(KEY_RAIN_MULTIPLIER_BY_REGION, {})
+        rain = G.graph.get(KEY_RAIN_MULTIPLIER, 1.0)
         slope_factor = G.graph.get(KEY_SLOPE_PENALTY_FACTOR, 1.0)
 
         def weight(u: Any, v: Any, d: Dict) -> float:
             key = (u, v)
             if key in override:
                 return override[key]
-            region = GraphOperations.get_region_from_graph(G, u)
-            rain = rain_by_region.get(region, rain_global)
             base = GraphOperations.compute_edge_cost(d, rain, slope_factor)
             return base * edge_multiplier.get(key, 1.0)
 

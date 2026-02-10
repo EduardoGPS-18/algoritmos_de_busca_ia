@@ -123,7 +123,7 @@ def _build_cytoscape_elements(
     goal_node: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Monta a lista de elementos (nós + arestas) no formato do Dash Cytoscape.
-    Nós em regiões com chuva local (rain_multiplier_by_region > 1) ganham ícone 💧.
+    Se chuva global (rain_multiplier > 1), nós ganham ícone 💧.
     Arestas congestionadas (congestion_factor_by_edge > 1) ganham ícone 🚗 na via (desenhada à frente).
     Se path_edges for passado, arestas do caminho recebem in_path=True (opacidade 100%); demais in_path=False (60%).
     start_node e goal_node recebem classes para destaque (vermelho e laranja). Texto dos nós sempre branco.
@@ -133,11 +133,13 @@ def _build_cytoscape_elements(
     """
     from src.graph_operations import (
         KEY_CONGESTION_FACTOR_BY_EDGE,
-        KEY_RAIN_MULTIPLIER_BY_REGION,
+        KEY_EDGE_COST_MULTIPLIER,
+        KEY_RAIN_MULTIPLIER,
         GraphOperations,
     )
-    rain_by_region = G.graph.get(KEY_RAIN_MULTIPLIER_BY_REGION, {})
+    rain_global = G.graph.get(KEY_RAIN_MULTIPLIER, 1.0)
     congestion_by_edge = G.graph.get(KEY_CONGESTION_FACTOR_BY_EDGE, {})
+    edge_cost_multiplier = G.graph.get(KEY_EDGE_COST_MULTIPLIER, {})
     elements: List[Dict[str, Any]] = []
     for n in G.nodes():
         x, y = pos[n][0], pos[n][1]
@@ -145,9 +147,7 @@ def _build_cytoscape_elements(
         if not (display_label and str(display_label).strip()):
             display_label = n.replace("_", " ").replace("-", " ").title()
         base_label = _abbreviate_city_in_label(str(display_label).strip())
-        region = GraphOperations.get_region_from_graph(G, n)
-        has_rain = bool(rain_by_region and rain_by_region.get(region, 1.0) > 1.0)
-        if has_rain:
+        if rain_global > 1.0:
             base_label += " 💧"
         # Cores de fundo por nó (saída=vermelho; chegada=laranja; demais=azul claro). Texto sempre branco.
         if n == start_node:
@@ -180,10 +180,10 @@ def _build_cytoscape_elements(
     for u, v in G.edges():
         edge_id = f"{u}->{v}"
         cost = edge_costs[(u, v)]
-        blocked = not math.isfinite(cost) and (cost == math.inf or cost == float("inf"))
+        blocked = not math.isfinite(cost)
+        congested = congestion_by_edge.get((u, v), 1.0) > 1.0 or edge_cost_multiplier.get((u, v), 1.0) > 1.0
         color = cost_to_color(cost)
         tooltip = edge_tooltips.get((u, v), "")
-        congested = congestion_by_edge.get((u, v), 1.0) > 1.0
         stripe_color = G.edges[u, v].get("stripe_color") or striped_edges.get((u, v))
         data: Dict[str, Any] = {
             "id": edge_id,
@@ -196,7 +196,12 @@ def _build_cytoscape_elements(
             data["blocked"] = True
         if congested:
             data["congested"] = True
-        if path_edges is not None:
+        # Via impedida: 80% transparência (opacidade 20%); congestionamento (veículo): 50% transparência (opacidade 50%)
+        if blocked:
+            data["edge_opacity"] = 0.2
+        elif congested:
+            data["edge_opacity"] = 0.5
+        elif path_edges is not None:
             data["in_path"] = (u, v) in path_edges
             data["edge_opacity"] = 1.0 if (u, v) in path_edges else 0.2
         else:
@@ -252,7 +257,7 @@ def display_graph(
 
     Retorna o app Dash (para reutilização ou run manual).
     """
-    from src.graph_operations import GraphOperations
+    from src.graph_operations import KEY_EDGE_COST_MULTIPLIER, GraphOperations
 
     pos = {n: G.nodes[n]["pos"] for n in G.nodes()}
     pos = _scale_positions_to_canvas(pos)
@@ -269,16 +274,20 @@ def display_graph(
     min_c = min(valid_costs) if valid_costs else 0.0
     max_c = max(valid_costs) if valid_costs else 1.0
 
+    edge_cost_mult = G.graph.get(KEY_EDGE_COST_MULTIPLIER, {})
+
     def edge_tooltip(u: str, v: str) -> str:
         d = G.edges[u, v]
         dist = d.get("distance", 0)
         slope = d.get("slope_pct", 0)
         cost = edge_costs.get((u, v), 0)
+        traffic_factor = edge_cost_mult.get((u, v), 1.0)
         orig, dest = _short_label(u), _short_label(v)
         return "\n".join([
             f"Conecta: {orig} → {dest}",
             f"Distância (distance): {dist:.0f} m",
             f"Declividade (slope_pct): {slope:.1f} %",
+            f"Fator de trânsito: {traffic_factor:.2f}",
             f"Custo: {cost:.1f}",
         ])
 
@@ -347,6 +356,7 @@ def display_graph(
         {
             "selector": "edge[blocked]",
             "style": {
+                "width": 1,
                 "label": "✕",
                 "color": "#e74c3c",
                 "font-size": "28px",
@@ -357,13 +367,13 @@ def display_graph(
                 "text-background-padding": "4px",
                 "line-color": "#666",
                 "target-arrow-color": "#666",
-                "width": 1.5,
                 "line-style": "dashed",
             },
         },
         {
             "selector": "edge[congested]",
             "style": {
+                "width": 1,
                 "label": "🚗",
                 "color": "#f1c40f",
                 "font-size": "22px",
