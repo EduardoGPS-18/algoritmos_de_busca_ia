@@ -94,9 +94,12 @@ class GoogleApiClient:
             r.raise_for_status()
             data = r.json()
             if data.get("status") != "OK" or "results" not in data:
+                print(f"Erro ao obter elevação: {data.get('status')}")
                 return [None] * len(locations)
             results = data["results"]
             out = []
+
+            print(f"sucesso ao obter elevação: {len(results)} results")
             for i, res in enumerate(results):
                 if i < len(locations) and "elevation" in res:
                     out.append(float(res["elevation"]))
@@ -105,7 +108,8 @@ class GoogleApiClient:
             while len(out) < len(locations):
                 out.append(None)
             return out[: len(locations)]
-        except Exception:
+        except Exception as e:
+            print(f"Erro ao obter elevação: {e}")
             return [None] * len(locations)
 
     def get_route_info(

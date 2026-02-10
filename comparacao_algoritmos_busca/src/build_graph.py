@@ -37,7 +37,7 @@ OURO_PRETO_BBOX = (
 )
 
 _OSM_BATCH_DELAY_SEC = 1.5
-_GOOGLE_ELEVATION_BATCH_SIZE = 512
+_GOOGLE_ELEVATION_BATCH_SIZE = 256
 _GOOGLE_ELEVATION_DELAY_SEC = 0.2
 
 
@@ -338,13 +338,13 @@ class BuildGraph:
         except Exception:
             return {}
 
-    def _save_op_graph_to_cache(self, G: nx.DiGraph) -> None:
+    def _save_op_graph_to_cache(self, G: nx.DiGraph, name: Optional[str] = None) -> None:
         """Persiste grafo no cache (mkdir + pickle). Não propaga exceção de I/O."""
         self._cache_dir.mkdir(parents=True, exist_ok=True)
         try:
-            with open(self.cache_op_graph, "wb") as f:
+            with open(name or self.cache_op_graph, "wb") as f:
                 pickle.dump(G, f)
-            print(f"Grafo OP (OSM) salvo em {self.cache_op_graph}")
+            print(f"Grafo OP (OSM) salvo em {name or self.cache_op_graph}")
         except Exception:
             pass
 
@@ -381,6 +381,7 @@ class BuildGraph:
                 elev_by_node[nid] = elevations[j] if j < len(elevations) else None
 
         visited: Set[str] = set()
+
         for u in node_ids:
             for v in G.successors(u):
                 if v in visited:
@@ -397,6 +398,8 @@ class BuildGraph:
                     G.edges[u, v]["slope_pct"] = slope_uv
                 if G.has_edge(v, u):
                     G.edges[v, u]["slope_pct"] = slope_vu
+
+
             visited.add(u)
             if len(visited) % 100 == 0:
                 print(f"enriching graph with elevation: {len(visited)}/{len(node_ids)} nodes processed")
@@ -417,7 +420,8 @@ class BuildGraph:
         """Constrói grafo das ruas de Ouro Preto (sede) via OpenStreetMap (Overpass API)."""
         cached = self._try_load_cached_op_graph(use_cache, force_rebuild)
         if cached is not None:
-            return cached
+            print(f"enriching cached graph with elevation")
+            return self.enrich_graph_with_elevation(cached, save_to_cache=True)
 
         seed_ways = self._find_seed_ways_ouro_preto()
         seen_way_ids, ways_by_id, node_to_way_ids = _init_ways_state_from_seeds(seed_ways)
