@@ -64,7 +64,7 @@ def _default_graph_metadata() -> Dict[str, Any]:
     return {
         KEY_RAIN_MULTIPLIER: 1.0,
         KEY_RAIN_MULTIPLIER_BY_REGION: {},
-        KEY_SLOPE_PENALTY_FACTOR: 1.0,
+        KEY_SLOPE_PENALTY_FACTOR: 2.0,  # mais peso à declividade (1.0 = neutro)
         KEY_CONGESTION_FACTOR: 1.0,
         KEY_CONGESTION_FACTOR_BY_REGION: {},
         KEY_EDGE_OVERRIDE: {},
@@ -420,8 +420,8 @@ class BuildGraph:
         """Constrói grafo das ruas de Ouro Preto (sede) via OpenStreetMap (Overpass API)."""
         cached = self._try_load_cached_op_graph(use_cache, force_rebuild)
         if cached is not None:
-            print(f"enriching cached graph with elevation")
-            return self.enrich_graph_with_elevation(cached, save_to_cache=True)
+            print(f"build_op_graph: grafo carregado do cache")
+            return cached
 
         seed_ways = self._find_seed_ways_ouro_preto()
         seen_way_ids, ways_by_id, node_to_way_ids = _init_ways_state_from_seeds(seed_ways)

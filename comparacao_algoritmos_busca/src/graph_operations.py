@@ -51,9 +51,10 @@ class GraphOperations:
         """
         dist = d.get("distance", 0.0)
         slope_pct = d.get("slope_pct", 0.0)
-
+        # Peso da declividade: acima de 15% penaliza mais (ruas íngremes)
         if slope_pct > 15:
-            slope_penalty = (slope_pct - 15) / 100 * slope_penalty_factor * rain_multiplier
+            slope_penalty = (slope_pct - 15) / 100 * slope_penalty_factor * rain_multiplier * 1.5
+            slope_penalty += (15 / 100) * slope_penalty_factor * rain_multiplier
         elif slope_pct > 0:
             slope_penalty = (slope_pct / 100) * slope_penalty_factor * rain_multiplier
         else:
