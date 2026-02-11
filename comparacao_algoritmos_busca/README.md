@@ -1,48 +1,81 @@
 # Comparação de Algoritmos de Busca em Grafos — IA UFOP
 
-Trabalho da disciplina BCC325 – Inteligência Artificial (UFOP).  
-Roteamento em Ouro Preto com função de custo (declividade, rugosidade, congestionamento) e comparação entre **Dijkstra**, **A*** e **D* Lite**.
+Projeto de comparação de algoritmos de busca (Dijkstra, A*, D* Lite) em grafo de ruas de Ouro Preto (OSM).
 
-## Estrutura
+## Requisitos
 
-- **`contexto/`** — Especificação da disciplina, base do trabalho e template SBC.
-- **`src/`** — Código Python:
-  - `graph.py`: grafo, vértices, arestas e função de custo.
-  - `algorithms/`: `dijkstra`, `a_star`, `d_star_lite`.
-  - `scenarios.py`: cenário de evento (ruas interditadas) e climático (chuva).
-  - `metrics.py`: latência, custo do caminho, proxy de vazão, GEH.
-- **`experimentos.ipynb`** — Notebook Jupyter para rodar experimentos e gerar resultados para o relatório.
-- **`relatorio/`** — Relatório em LaTeX (template SBC, Overleaf).
-
-## Grafo a partir do OpenStreetMap (Overpass)
-
-O grafo é gerado via **Overpass API** (OSM):
-
-- **`BuildGraph().build_op_graph(levels=4, use_cache=True)`** — constrói o grafo das ruas de Ouro Preto (sede) a partir de ways conectadas, com cache em `cache/grafo_op_osm.gpickle`.
-
-Não é necessária API key do Google para construir o grafo (apenas conversão de coordenadas usa helpers que podem vir do `GoogleApiClient`).
+- **Python 3.8+**
+- (Opcional) Chave da API Google Maps, para enriquecer o grafo com elevação no primeiro build
 
 ## Como rodar
 
-1. Instalar dependências: `pip install -r requirements.txt`
-2. Abrir `experimentos.ipynb` e executar as células (kernel com cwd = pasta do projeto).
-
-Ou no terminal:
+### 1. Clonar / entrar no projeto
 
 ```bash
 cd comparacao_algoritmos_busca
-python3 -c "from src.build_graph import BuildGraph; from src.algorithms import dijkstra; G = BuildGraph().build_op_graph(use_cache=True); nodes = list(G.nodes()); print(dijkstra(G, nodes[0], nodes[-1]) if len(nodes) >= 2 else 'Grafo com poucos nós')"
 ```
 
-## Relatório
+### 2. Criar ambiente virtual (recomendado)
 
-- Até 9 páginas, formato SBC.
-- Seções: Introdução, Problema, Técnica de IA, Implementação, Cenários, Resultados e Análise, Conclusões, Referências.
-- Em caso de uso de modelos de linguagem: preencher ANEXO I com os prompts utilizados.
+```bash
+python3 -m venv .venv
+source .venv/bin/activate   # Linux/macOS
+# .venv\Scripts\activate    # Windows
+```
 
-## Critérios de avaliação (especificação)
+### 3. Instalar dependências
 
-- Qualidade da implementação (10%)
-- Adequação da técnica de IA (20%)
-- Análise de resultados (35%)
-- Clareza na documentação e apresentação (35%)
+```bash
+pip install -r requirements.txt
+```
+
+### 4. Variáveis de ambiente (opcional)
+
+Para (re)construir o grafo com dados de elevação (Google Elevation API), crie um arquivo `.env` na raiz do projeto:
+
+```bash
+GOOGLE_MAPS_API_KEY=sua_chave_aqui
+```
+
+Se não definir a chave, o build do grafo pode usar cache existente ou construir sem elevação (conforme o código em `src/build_graph.py`).
+
+### 5. Executar os experimentos
+
+A aplicação é executada via **Jupyter Notebook**:
+
+```bash
+jupyter notebook experimentos.ipynb
+```
+
+Ou com JupyterLab:
+
+```bash
+jupyter lab experimentos.ipynb
+```
+
+No notebook, execute as células em ordem:
+
+1. **Células iniciais** — ajuste de `sys.path` e imports.
+2. **Grafo base** — carrega ou constrói o grafo de Ouro Preto (`builder.build_op_graph(..., use_cache=True)`).
+3. **Cenários** — comparação dos três algoritmos e casos de teste (bloqueios, chuva, trânsito, etc.).
+
+### Cache
+
+O grafo e caches OSM ficam em `cache/`. Com `use_cache=True`, o notebook reutiliza o grafo já construído e evita novas chamadas à API.
+
+## Estrutura resumida
+
+| Pasta/arquivo   | Descrição |
+|-----------------|-----------|
+| `experimentos.ipynb` | Notebook principal: build do grafo e experimentos |
+| `src/`          | Código: algoritmos (Dijkstra, A*, D* Lite), build do grafo, clientes OSM/Google, métricas |
+| `cache/`        | Grafos e caches (`.gpickle`, `.json`, etc.) |
+| `requirements.txt` | Dependências Python |
+
+## Dependências principais
+
+- `networkx` — grafos
+- `requests` — chamadas HTTP (Overpass, Google)
+- `python-dotenv` — carregamento de `.env`
+- `jupyter`, `notebook`, `ipykernel` — execução do notebook
+- Opcionais: `pandas`, `matplotlib`, `dash`, `dash-cytoscape` (análise e visualização)

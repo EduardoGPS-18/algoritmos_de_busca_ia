@@ -7,7 +7,7 @@ Métricas de avaliação conforme base_trabalho_ia.pdf:
 """
 
 import time
-from typing import Any, Callable, List, Optional, Tuple
+from typing import Any, Callable, Tuple
 
 
 def measure_latency_ms(
@@ -24,17 +24,4 @@ def measure_latency_ms(
         result = fn()
     elapsed = (time.perf_counter() - start) / repetitions * 1000
     return elapsed, result
-
-
-def path_cost_from_list(
-    cost_fn: Callable[[str, str], float],
-    path: List[str],
-) -> float:
-    """Custo total de um caminho (soma dos custos das arestas)."""
-    if len(path) < 2:
-        return 0.0
-    total = 0.0
-    for i in range(len(path) - 1):
-        total += cost_fn(path[i], path[i + 1])
-    return total
 
