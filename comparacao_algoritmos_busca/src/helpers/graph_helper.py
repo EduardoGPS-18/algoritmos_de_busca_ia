@@ -125,7 +125,7 @@ def _build_cytoscape_elements(
     """Monta a lista de elementos (nós + arestas) no formato do Dash Cytoscape.
     Se chuva global (rain_multiplier > 1), nós ganham ícone 💧.
     Arestas congestionadas (congestion_factor_by_edge > 1) ganham ícone 🚗 na via (desenhada à frente).
-    Se path_edges for passado, arestas do caminho recebem in_path=True (opacidade 100%); demais in_path=False (60%).
+    Se path_edges for passado, arestas do caminho recebem opacidade 100%; demais 20%. Mesma espessura (1) para todas.
     start_node e goal_node recebem classes para destaque (vermelho e laranja). Texto dos nós sempre branco.
     Arestas com segunda cor (efeito listrado): use G.edges[u,v]['stripe_color'] = '#hex' ou
     G.graph['striped_edges'] = {(u,v): '#hex', ...}; a linha principal fica sólida e uma camada tracejada
@@ -196,11 +196,9 @@ def _build_cytoscape_elements(
             data["blocked"] = True
         if congested:
             data["congested"] = True
-        # Via impedida: 80% transparência (opacidade 20%); congestionamento (veículo): 50% transparência (opacidade 50%)
+        # Via impedida: opacidade 20%. Path: 100%; arestas fora do path: 20%.
         if blocked:
             data["edge_opacity"] = 0.2
-        elif congested:
-            data["edge_opacity"] = 0.5
         elif path_edges is not None:
             data["in_path"] = (u, v) in path_edges
             data["edge_opacity"] = 1.0 if (u, v) in path_edges else 0.2
@@ -247,8 +245,7 @@ def display_graph(
     é exibido via app Dash (não gera arquivo HTML).
 
     path: lista de nós do caminho percorrido (ex.: retorno de dijkstra). Se passado,
-    arestas fora do caminho ficam com opacidade 60% e arestas do caminho com 100%,
-    sem remover nenhuma informação do grafo.
+    arestas do caminho ficam com opacidade 100%, as demais com 20%; espessura igual para todas.
 
     start: id do nó de partida/saída (vermelho). goal: id do nó de destino/chegada (laranja). Textos em branco.
 
@@ -348,18 +345,20 @@ def display_graph(
             "selector": "edge",
             "style": edge_base_style,
         },
-        # Arestas do caminho real (path): mais espessas que as demais (base = 2)
         {
             "selector": "edge[in_path]",
-            "style": {"width": 6},
+            "style": {
+                "width": 4,
+                "edge_opacity": 1,
+            },
         },
         {
             "selector": "edge[blocked]",
             "style": {
-                "width": 1,
+                "width": 4,
                 "label": "✕",
                 "color": "#e74c3c",
-                "font-size": "28px",
+                "font-size": "32px",
                 "font-weight": "bold",
                 "text-margin-y": 0,
                 "text-background-opacity": 0,
@@ -373,10 +372,10 @@ def display_graph(
         {
             "selector": "edge[congested]",
             "style": {
-                "width": 1,
+                "width": 4,
                 "label": "🚗",
                 "color": "#f1c40f",
-                "font-size": "22px",
+                "font-size": "26px",
                 "text-margin-y": -10,
                 "text-background-opacity": 0,
                 "text-background-color": "transparent",

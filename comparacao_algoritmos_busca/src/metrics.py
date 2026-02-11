@@ -38,22 +38,3 @@ def path_cost_from_list(
         total += cost_fn(path[i], path[i + 1])
     return total
 
-
-def throughput_proxy(path_cost: float, scale: float = 3600.0) -> float:
-    """
-    Proxy de vazão: inversamente proporcional ao custo do caminho.
-    scale pode ser usado para calibrar "veículos/hora" se custo for tempo em segundos.
-    """
-    if path_cost <= 0:
-        return 0.0
-    return scale / path_cost
-
-
-def geh_statistic(observed: float, simulated: float) -> float:
-    """
-    Estatística GEH: sqrt(2 * (simulated - observed)^2 / (simulated + observed)).
-    Usada para validar volume de tráfego simulado vs. contagens reais.
-    """
-    if simulated + observed == 0:
-        return 0.0
-    return (2 * (simulated - observed) ** 2 / (simulated + observed)) ** 0.5

@@ -32,9 +32,9 @@ class TestCases:
     """
 
     # ---- Chuva (multiplicador global) ----
-    RAIN_LIGHT = 1.5
-    RAIN_MEDIUM = 2.0
-    RAIN_HEAVY = 3.0
+    RAIN_LIGHT = 3.5
+    RAIN_MEDIUM = 5.0
+    RAIN_HEAVY = 8.0
 
     # ---- Simples: um tipo de impeditivo em um trecho ----
     # Caso 1: uma via bloqueada (início do percurso)
